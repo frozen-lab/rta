@@ -2,6 +2,11 @@
 name = "rta"
 edition = "2024"
 version = "0.0.1"
+license = "MIT OR Apache-2.0"
+categories = ["no-std", "no-std::no-alloc"]
+repository = "https://github.com/frozen-lab/rta"
+keywords = ["rta", "database", "persistence", "storage"]
+description = "Ṛta (ऋत) is a minimal metadata store for durable system state"
 
 [dependencies]
 frozen-core = "0.0.1"
