@@ -1,0 +1,20 @@
+[package]
+edition = "2024"
+version = "0.0.1"
+name = "rta-derive"
+license = "MIT OR Apache-2.0"
+categories = ["no-std", "no-std::no-alloc"]
+description = "Macro implementation for Ṛta"
+repository = "https://github.com/frozen-lab/rta"
+keywords = ["rta", "database", "persistence", "storage"]
+
+[dependencies]
+syn = "2.0"
+quote = "1.0"
+proc-macro2 = "1.0"
+
+[lib]
+proc-macro = true
+
+[dev-dependencies]
+trybuild = "1.0"
