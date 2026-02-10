@@ -46,3 +46,49 @@ pub fn derive_rta(input: TokenStream) -> TokenStream {
 
     TokenStream::from(expanded)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::hasher;
+
+    mod hash {
+        use super::*;
+
+        #[test]
+        fn hasher_same_input_same_hash() {
+            let h1 = hasher(0, b"u64");
+            let h2 = hasher(0, b"u64");
+            assert_eq!(h1, h2);
+        }
+
+        #[test]
+        fn hasher_different_inputs_different_hashes() {
+            let h1 = hasher(0, b"u64");
+            let h2 = hasher(0, b"u32");
+            assert_ne!(h1, h2);
+        }
+
+        #[test]
+        fn hasher_order_sensitive() {
+            let h1 = hasher(0, b"u64u32");
+            let h2 = hasher(0, b"u32u64");
+            assert_ne!(h1, h2);
+        }
+
+        #[test]
+        fn hasher_incremental_equals_one_shot() {
+            let mut h = hasher(0, b"u64");
+            h = hasher(h, b"u32");
+
+            let one_shot = hasher(0, b"u64u32");
+
+            assert_eq!(h, one_shot);
+        }
+
+        #[test]
+        fn hasher_empty_is_offset_basis() {
+            let h = hasher(0, b"");
+            assert_eq!(h, 0xcbf29ce484222325);
+        }
+    }
+}
