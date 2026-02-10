@@ -1,0 +1,8 @@
+[package]
+name = "rta"
+edition = "2024"
+version = "0.0.1"
+
+[dependencies]
+frozen-core = "0.0.1"
+rta-derive = {version = "0.0.1", path = "../rta-derive"}
