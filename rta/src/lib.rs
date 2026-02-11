@@ -58,7 +58,7 @@ where
 
                 di.obja.obj = T::default();
                 di.obja.ver = 1;
-                di.obja.crc = crc64(Self::to_bytes(&di.obja.obj));
+                di.obja.crc = crc32(Self::to_bytes(&di.obja.obj));
 
                 di.objb = di.obja.clone();
             })?;
@@ -162,7 +162,7 @@ where
 
             target.obj = new_val.clone();
             target.ver = target.ver.wrapping_add(1);
-            target.crc = crc64(Self::to_bytes(&target.obj));
+            target.crc = crc32(Self::to_bytes(&target.obj));
         })?;
 
         Ok(())
@@ -184,13 +184,53 @@ where
 
     #[inline]
     fn valid(obj: &DiskObject<T>) -> bool {
-        crc64(Self::to_bytes(&obj.obj)) == obj.crc
+        crc32(Self::to_bytes(&obj.obj)) == obj.crc
     }
 }
 
 #[inline]
-fn crc64(_bytes: &[u8]) -> u64 {
-    1u64
+fn crc32(bytes: &[u8]) -> u32 {
+    const POLY: u32 = 0x82F63B78;
+    let mut crc: u32 = 0;
+
+    // hardware streaming CRC32C (x86 only) (Castagnoli, reflected)
+    if std::is_x86_feature_detected!("sse4.2") {
+        use core::arch::x86_64::{_mm_crc32_u64, _mm_crc32_u8};
+
+        unsafe {
+            let mut ptr = bytes.as_ptr();
+            let mut len = bytes.len();
+
+            while len >= 8 {
+                let val = core::ptr::read_unaligned(ptr as *const u64);
+                crc = _mm_crc32_u64(crc as u64, val) as u32;
+                ptr = ptr.add(8);
+                len -= 8;
+            }
+
+            while len > 0 {
+                crc = _mm_crc32_u8(crc, *ptr);
+                ptr = ptr.add(1);
+                len -= 1;
+            }
+
+            return crc;
+        }
+    }
+
+    // CRC32C fallback
+    for &b in bytes {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ POLY;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+
+    crc
 }
 
 #[repr(C)]
@@ -204,6 +244,6 @@ struct DiskInterface<T: RTA> {
 #[derive(Clone)]
 struct DiskObject<T: RTA> {
     obj: T,
-    ver: u64,
-    crc: u64,
+    ver: u32,
+    crc: u32,
 }
