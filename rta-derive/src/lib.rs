@@ -40,7 +40,6 @@ pub fn derive_rta(input: TokenStream) -> TokenStream {
     let expanded = quote! {
         unsafe impl rta::RTA for #ident {
             const HASH: u64 = #hash;
-            const SIZE: usize = core::mem::size_of::<Self>();
         }
     };
 

@@ -1,63 +1,130 @@
-#![allow(unused)]
-
-use core::{ptr, slice};
+use core::{marker::PhantomData, slice};
 use frozen_core::{
     fe::FRes,
     ff::{FFCfg, FF},
     fm::{FMCfg, FM},
 };
 
-const MID: u8 = 0x01;
+const MOD_ID: u8 = 0x01;
+const FLUSH_DURATION: std::time::Duration = std::time::Duration::from_millis(250);
 
 pub use rta_derive::RTA;
 
-pub unsafe trait RTA: Clone + Sized {
+pub unsafe trait RTA: Clone + Sized + Default {
     const HASH: u64;
-    const SIZE: usize;
 }
 
 pub struct Rta<T: RTA> {
-    tp: T,
-    file: FF,
     mmap: FM,
+    _file: FF,
+    _marker: PhantomData<T>,
     lock: std::sync::Mutex<()>,
 }
 
 impl<T> Rta<T>
 where
-    T: RTA + Clone + Sized,
+    T: RTA + Clone + Sized + Default,
 {
     const FILE_SIZE: usize = core::mem::size_of::<DiskInterface<T>>();
 
-    pub fn new(tp: &T, path: std::path::PathBuf) -> FRes<Self> {
+    pub fn new(path: std::path::PathBuf) -> FRes<Self> {
+        if path.exists() {
+            panic!("invalid path, path to already existing file");
+        }
+
+        if path.is_dir() {
+            panic!("path must be of a file, not dir");
+        }
+
         let file_cfg = FFCfg {
             path,
-            module_id: MID,
             auto_flush: false,
-            flush_duration: std::time::Duration::from_secs(1),
+            module_id: MOD_ID,
+            flush_duration: FLUSH_DURATION,
         };
-        let file = FF::new(file_cfg, Self::FILE_SIZE as u64)?;
-
         let mmap_cfg = FMCfg {
-            module_id: MID,
+            module_id: MOD_ID,
             auto_flush: true,
-            flush_duration: std::time::Duration::from_millis(200),
+            flush_duration: FLUSH_DURATION,
         };
-        let mmap = FM::new(file.fd(), Self::FILE_SIZE, mmap_cfg)?;
+
+        let _file = FF::new(file_cfg, Self::FILE_SIZE as u64)?;
+        let mmap = FM::new(_file.fd(), Self::FILE_SIZE, mmap_cfg)?;
+
+        {
+            let writer = mmap.writer::<DiskInterface<T>>(0)?;
+            writer.write(|di| {
+                di.hash = T::HASH;
+
+                di.obja.obj = T::default();
+                di.obja.ver = 1;
+                di.obja.crc = crc64(Self::to_bytes(&di.obja.obj));
+
+                di.objb = di.obja.clone();
+            })?;
+        }
 
         Ok(Self {
-            file,
+            _file,
             mmap,
-            tp: tp.clone(),
+            _marker: PhantomData,
             lock: std::sync::Mutex::new(()),
         })
     }
 
-    pub fn size(&self) -> usize {
-        T::SIZE
+    pub fn open(path: std::path::PathBuf) -> FRes<Self> {
+        if !path.exists() {
+            panic!("Rta does not exists");
+        }
+
+        if !path.is_file() {
+            panic!("Path is not a file");
+        }
+
+        let file_cfg = FFCfg {
+            path,
+            auto_flush: false,
+            module_id: MOD_ID,
+            flush_duration: FLUSH_DURATION,
+        };
+        let mmap_cfg = FMCfg {
+            module_id: MOD_ID,
+            auto_flush: true,
+            flush_duration: FLUSH_DURATION,
+        };
+
+        let _file = FF::open(file_cfg)?;
+        let mmap = FM::new(_file.fd(), Self::FILE_SIZE, mmap_cfg)?;
+
+        {
+            let r = mmap.reader::<DiskInterface<T>>(0)?;
+            r.read(|di| {
+                if di.hash != T::HASH {
+                    panic!("metadata hash mismatch");
+                }
+
+                let a = Self::valid(&di.obja);
+                let b = Self::valid(&di.objb);
+
+                if !a && !b {
+                    panic!("both metadata copies corrupt");
+                }
+            });
+        }
+
+        Ok(Self {
+            _file,
+            mmap,
+            _marker: PhantomData,
+            lock: std::sync::Mutex::new(()),
+        })
     }
 
-    pub fn hash(&self) -> u64 {
+    pub fn size() -> usize {
+        core::mem::size_of::<T>()
+    }
+
+    pub fn hash() -> u64 {
         T::HASH
     }
 
@@ -102,17 +169,8 @@ where
     }
 
     #[inline]
-    const fn to_bytes(tp: &T) -> &[u8] {
-        unsafe { slice::from_raw_parts(tp as *const T as *const u8, T::SIZE) }
-    }
-
-    #[inline]
-    fn select_latest(di: &DiskInterface<T>) -> &DiskObject<T> {
-        if di.obja.ver >= di.objb.ver {
-            &di.obja
-        } else {
-            &di.objb
-        }
+    fn to_bytes(t: &T) -> &[u8] {
+        unsafe { slice::from_raw_parts(t as *const T as *const u8, Self::size()) }
     }
 
     #[inline]
@@ -132,7 +190,7 @@ where
 
 #[inline]
 fn crc64(_bytes: &[u8]) -> u64 {
-    0u64
+    1u64
 }
 
 #[repr(C)]
@@ -143,6 +201,7 @@ struct DiskInterface<T: RTA> {
 }
 
 #[repr(C)]
+#[derive(Clone)]
 struct DiskObject<T: RTA> {
     obj: T,
     ver: u64,
