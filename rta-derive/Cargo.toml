@@ -2,6 +2,7 @@
 edition = "2024"
 version = "0.0.1"
 name = "rta-derive"
+readme = "../README.md"
 license = "MIT OR Apache-2.0"
 categories = ["no-std", "no-std::no-alloc"]
 description = "Macro implementation for Ṛta"

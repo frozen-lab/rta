@@ -2,6 +2,7 @@
 name = "rta"
 edition = "2024"
 version = "0.0.1"
+readme = "../README.md"
 license = "MIT OR Apache-2.0"
 categories = ["no-std", "no-std::no-alloc"]
 repository = "https://github.com/frozen-lab/rta"
