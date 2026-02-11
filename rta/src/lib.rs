@@ -158,10 +158,11 @@ where
         let w = self.mmap.writer::<DiskInterface<T>>(0)?;
 
         w.write(|di| {
+            let max_ver = di.obja.ver.max(di.objb.ver);
             let target = Self::select_oldest_mut(di);
 
             target.obj = new_val.clone();
-            target.ver = target.ver.wrapping_add(1);
+            target.ver = max_ver.wrapping_add(1);
             target.crc = crc32(Self::to_bytes(&target.obj));
         })?;
 
