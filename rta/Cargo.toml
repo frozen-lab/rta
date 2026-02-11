@@ -9,5 +9,5 @@ keywords = ["rta", "database", "persistence", "storage"]
 description = "Ṛta (ऋत) is a minimal metadata store for durable system state"
 
 [dependencies]
-frozen-core = "0.0.1"
+frozen-core = {version = "0.0.1", features = ["ff", "fm"]}
 rta-derive = {version = "0.0.1", path = "../rta-derive"}
