@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 description = "Macro implementation for Ṛta"
 repository = "https://github.com/frozen-lab/rta"
 keywords = ["rta", "database", "persistence", "storage"]
-categories = ["caching", "configuration", "database-implementations", "no-std", "no-std::no-alloc"]
+categories = ["caching", "database-implementations", "no-std", "no-std::no-alloc"]
 
 [dependencies]
 syn = "2.0"
