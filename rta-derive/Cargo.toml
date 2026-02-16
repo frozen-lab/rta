@@ -1,13 +1,13 @@
 [package]
-edition = "2024"
-version = "0.0.1"
 name = "rta-derive"
-readme = "../README.md"
+edition = "2024"
+version = "0.1.0"
+readme = "README.md"
 license = "MIT OR Apache-2.0"
-categories = ["no-std", "no-std::no-alloc"]
 description = "Macro implementation for Ṛta"
 repository = "https://github.com/frozen-lab/rta"
 keywords = ["rta", "database", "persistence", "storage"]
+categories = ["caching", "configuration", "database-implementations", "no-std", "no-std::no-alloc"]
 
 [dependencies]
 syn = "2.0"
