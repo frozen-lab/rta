@@ -4,13 +4,13 @@ edition = "2024"
 version = "0.0.1"
 readme = "../README.md"
 license = "MIT OR Apache-2.0"
-categories = ["no-std", "no-std::no-alloc"]
 repository = "https://github.com/frozen-lab/rta"
 keywords = ["rta", "database", "persistence", "storage"]
+categories = ["caching", "configuration", "database-implementations"]
 description = "Ṛta (ऋत) is a minimal metadata store for durable system state"
 
 [dependencies]
-frozen-core = {version = "0.0.1", features = ["ff", "fm"]}
+frozen-core = {version = "0.0.4", features = ["ff", "fm"]}
 rta-derive = {version = "0.0.1", path = "../rta-derive"}
 
 [dev-dependencies]

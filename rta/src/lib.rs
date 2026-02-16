@@ -1,8 +1,8 @@
 use core::{marker::PhantomData, slice};
 use frozen_core::{
     fe::FRes,
-    ff::{FFCfg, FF},
-    fm::{FMCfg, FM},
+    ff::{FFCfg, FrozenFile},
+    fm::{FMCfg, FrozenMMap},
 };
 
 const MOD_ID: u8 = 0x01;
@@ -15,8 +15,8 @@ pub unsafe trait RTA: Clone + Sized + Default {
 }
 
 pub struct Rta<T: RTA> {
-    mmap: FM,
-    _file: FF,
+    mmap: FrozenMMap,
+    _file: FrozenFile,
     _marker: PhantomData<T>,
     lock: std::sync::Mutex<()>,
 }
@@ -38,9 +38,7 @@ where
 
         let file_cfg = FFCfg {
             path,
-            auto_flush: false,
             module_id: MOD_ID,
-            flush_duration: FLUSH_DURATION,
         };
         let mmap_cfg = FMCfg {
             module_id: MOD_ID,
@@ -48,8 +46,8 @@ where
             flush_duration: FLUSH_DURATION,
         };
 
-        let _file = FF::new(file_cfg, Self::FILE_SIZE as u64)?;
-        let mmap = FM::new(_file.fd(), Self::FILE_SIZE, mmap_cfg)?;
+        let _file = FrozenFile::new(file_cfg, Self::FILE_SIZE as u64)?;
+        let mmap = FrozenMMap::new(_file.fd(), Self::FILE_SIZE, mmap_cfg)?;
 
         {
             let writer = mmap.writer::<DiskInterface<T>>(0)?;
@@ -83,9 +81,7 @@ where
 
         let file_cfg = FFCfg {
             path,
-            auto_flush: false,
             module_id: MOD_ID,
-            flush_duration: FLUSH_DURATION,
         };
         let mmap_cfg = FMCfg {
             module_id: MOD_ID,
@@ -93,8 +89,8 @@ where
             flush_duration: FLUSH_DURATION,
         };
 
-        let _file = FF::open(file_cfg)?;
-        let mmap = FM::new(_file.fd(), Self::FILE_SIZE, mmap_cfg)?;
+        let _file = FrozenFile::open(file_cfg)?;
+        let mmap = FrozenMMap::new(_file.fd(), Self::FILE_SIZE, mmap_cfg)?;
 
         {
             let r = mmap.reader::<DiskInterface<T>>(0)?;
