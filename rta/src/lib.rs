@@ -1,6 +1,11 @@
 use core::{marker::PhantomData, slice};
-use frozen_core::{error, ffile, fmmap};
-use std::os::unix::ffi::OsStrExt;
+use frozen_core::{
+    error::FrozenRes,
+    ffile::FrozenFile,
+    fmmap::{FMCfg, FrozenMMap},
+};
+
+pub use rta_derive::RTA;
 
 /// module id for [`Rta`] is `1`
 const MOD_ID: u8 = 1;
@@ -8,7 +13,12 @@ const MOD_ID: u8 = 1;
 /// default flush duration for [`FrozenMMap`], we perform sync at interval of `256 ms`
 const DEFAULT_FLUSH_DURATION: std::time::Duration = std::time::Duration::from_millis(0x100);
 
-pub use rta_derive::RTA;
+/// default config used for [`FrozenMMap`]
+const MMAP_CFG: FMCfg = FMCfg {
+    module_id: MOD_ID,
+    auto_flush: true,
+    flush_duration: DEFAULT_FLUSH_DURATION,
+};
 
 /// Derives the `rta::RTA` trait for a struct `T`
 ///
@@ -23,150 +33,207 @@ pub use rta_derive::RTA;
 /// and deterministic id for a given type `T`
 ///
 /// This is to track any changes in the implementation of type `T`
-pub unsafe trait RTA: Clone + Sized + Default {
+pub unsafe trait RTA: Sized + Default {
+    /// deterministic precomputed (at compile time) `u64` hash for type `T`
     const HASH: u64;
+
+    /// object size of type `T`, determined using `core::mem::size_of::<T>()`
     const SIZE: usize;
 }
 
+/// Ṛta (ऋत) is a minimal metadata store for durable system state
 pub struct Rta<T: RTA> {
-    mmap: fmmap::FrozenMMap,
+    mmap: FrozenMMap,
     lock: std::sync::Mutex<()>,
     _type: PhantomData<T>,
 }
 
 impl<T> Rta<T>
 where
-    T: RTA + Clone + Sized + Default,
+    T: RTA + Sized + Default,
 {
-    const FILE_SIZE: usize = core::mem::size_of::<DiskInterface<T>>();
+    const SIZE_ON_DISK: usize = core::mem::size_of::<DiskInterface<T>>();
 
-    pub fn new(path: std::path::PathBuf) -> error::FrozenRes<Self> {
-        if path.exists() {
-            panic!("invalid path, path to already existing file");
-        }
+    /// Create a new instance of [`Rta`]
+    pub fn new(path: Vec<u8>) -> FrozenRes<Self> {
+        let file = FrozenFile::new(path, Self::SIZE_ON_DISK as u64, MOD_ID)?;
+        let mmap = FrozenMMap::new(file, Self::SIZE_ON_DISK, MMAP_CFG)?;
 
-        if path.is_dir() {
-            panic!("path must be of a file, not dir");
-        }
-
-        let mmap_cfg = fmmap::FMCfg {
-            auto_flush: true,
-            module_id: MOD_ID,
-            flush_duration: DEFAULT_FLUSH_DURATION,
-        };
-
-        let file = ffile::FrozenFile::new(path.as_os_str().as_bytes().to_vec(), Self::FILE_SIZE as u64, MOD_ID)?;
-        let mmap = fmmap::FrozenMMap::new(file, Self::FILE_SIZE, mmap_cfg)?;
-
-        {
-            let writer = mmap.writer::<DiskInterface<T>>(0)?;
-            writer.write(|di| {
-                di.hash = T::HASH;
-
-                di.obja.obj = T::default();
-                di.obja.ver = 1;
-                di.obja.crc = crc32(to_bytes(&di.obja.obj));
-
-                di.objb = di.obja.clone();
-            })?;
-        }
+        Self::init_if_new(&mmap)?;
 
         Ok(Self {
             mmap,
-            _type: PhantomData,
             lock: std::sync::Mutex::new(()),
+            _type: PhantomData,
         })
     }
 
-    pub fn open(path: std::path::PathBuf) -> error::FrozenRes<Self> {
-        if !path.exists() {
-            panic!("Rta does not exists");
-        }
+    pub fn read<R>(&self, f: impl FnOnce(&T) -> R) -> FrozenRes<R> {
+        let reader = self.mmap.reader::<DiskInterface<T>>(0)?;
 
-        if !path.is_file() {
-            panic!("Path is not a file");
-        }
-
-        let mmap_cfg = fmmap::FMCfg {
-            module_id: MOD_ID,
-            auto_flush: true,
-            flush_duration: DEFAULT_FLUSH_DURATION,
-        };
-
-        let file = ffile::FrozenFile::new(path.as_os_str().as_bytes().to_vec(), Self::FILE_SIZE as u64, MOD_ID)?;
-        let mmap = fmmap::FrozenMMap::new(file, Self::FILE_SIZE, mmap_cfg)?;
-
-        {
-            let r = mmap.reader::<DiskInterface<T>>(0)?;
-            r.read(|di| {
-                if di.hash != T::HASH {
-                    panic!("metadata hash mismatch");
-                }
-
-                let a = di.obja.valid();
-                let b = di.objb.valid();
-
-                if !a && !b {
-                    panic!("both metadata copies corrupt");
-                }
-            });
-        }
-
-        Ok(Self {
-            mmap,
-            _type: PhantomData,
-            lock: std::sync::Mutex::new(()),
-        })
-    }
-
-    pub fn size() -> usize {
-        core::mem::size_of::<T>()
-    }
-
-    pub fn hash() -> u64 {
-        T::HASH
-    }
-
-    #[inline(always)]
-    pub fn read(&self) -> error::FrozenRes<T> {
-        let r = self.mmap.reader::<DiskInterface<T>>(0)?;
-        let val = r.read(|di| {
+        let result = reader.read(|di| {
             let a_valid = di.obja.valid();
             let b_valid = di.objb.valid();
 
-            match (a_valid, b_valid) {
+            let chosen = match (a_valid, b_valid) {
                 (true, true) => {
                     if di.obja.ver >= di.objb.ver {
-                        di.obja.obj.clone()
+                        &di.obja
                     } else {
-                        di.objb.obj.clone()
+                        &di.objb
                     }
                 }
-                (true, false) => di.obja.obj.clone(),
-                (false, true) => di.objb.obj.clone(),
-                (false, false) => panic!("both metadata copies corrupt"),
-            }
+                (true, false) => &di.obja,
+                (false, true) => &di.objb,
+                (false, false) => return None,
+            };
+
+            Some(f(&chosen.obj))
         });
 
-        Ok(val)
+        result.ok_or_else(|| {
+            frozen_core::error::FrozenErr::new(
+                MOD_ID,
+                0x01,
+                0x03,
+                b"corrupted state",
+                b"no valid object copies".to_vec(),
+            )
+        })
     }
 
-    #[inline(always)]
-    pub fn write(&self, new_val: &T) -> error::FrozenRes<()> {
-        let _g = self.lock.lock().unwrap();
-        let w = self.mmap.writer::<DiskInterface<T>>(0)?;
+    pub fn write(&self, f: impl FnOnce(&mut T)) -> FrozenRes<()> {
+        let _g = self.lock.lock().expect("Rta write lock poisoned");
+        let writer = self.mmap.writer::<DiskInterface<T>>(0)?;
 
-        w.write(|di| {
+        writer.write(|di| {
             let max_ver = di.obja.ver.max(di.objb.ver);
             let target = di.select_oldest_mut();
 
-            target.obj = new_val.clone();
+            f(&mut target.obj);
+
             target.ver = max_ver.wrapping_add(1);
             target.crc = crc32(to_bytes(&target.obj));
         })?;
 
         Ok(())
     }
+
+    fn init_if_new(mmap: &FrozenMMap) -> FrozenRes<()> {
+        let reader = mmap.reader::<DiskInterface<T>>(0)?;
+        match reader.read(|di| di.state()) {
+            DIState::Uninitialized => {
+                let writer = mmap.writer::<DiskInterface<T>>(0)?;
+                writer.write(|di| di.bootstrap())?;
+            }
+            DIState::Valid => {}
+            DIState::HashMismatch => {
+                return Err(frozen_core::error::FrozenErr::new(
+                    MOD_ID,
+                    0x01,
+                    0x01,
+                    b"type hash mismatch",
+                    b"stored hash != T::HASH".to_vec(),
+                ));
+            }
+            DIState::Corrupted => {
+                return Err(frozen_core::error::FrozenErr::new(
+                    MOD_ID,
+                    0x01,
+                    0x02,
+                    b"corrupted disk state",
+                    b"no valid copies".to_vec(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+enum DIState {
+    Uninitialized,
+    Valid,
+    HashMismatch,
+    Corrupted,
+}
+
+#[repr(C)]
+struct DiskInterface<T: RTA> {
+    hash: u64,
+    obja: DiskObject<T>,
+    objb: DiskObject<T>,
+}
+
+impl<T> DiskInterface<T>
+where
+    T: RTA,
+{
+    #[inline]
+    fn state(&self) -> DIState {
+        if self.hash == 0 {
+            return DIState::Uninitialized;
+        }
+
+        if self.hash != T::HASH {
+            return DIState::HashMismatch;
+        }
+
+        if self.obja.valid() || self.objb.valid() {
+            return DIState::Valid;
+        }
+
+        DIState::Corrupted
+    }
+
+    #[inline]
+    fn bootstrap(&mut self) {
+        let default = T::default();
+        let crc = crc32(to_bytes(&default));
+
+        self.hash = T::HASH;
+
+        // primary copy (valid)
+        self.obja.obj = default;
+        self.obja.ver = 1;
+        self.obja.crc = crc;
+
+        // secondary copy (invalid)
+        self.objb.ver = 0;
+        self.objb.crc = 0;
+    }
+
+    #[inline]
+    fn select_oldest_mut(&mut self) -> &mut DiskObject<T> {
+        if self.obja.ver <= self.objb.ver {
+            &mut self.obja
+        } else {
+            &mut self.objb
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone)]
+struct DiskObject<T: RTA> {
+    obj: T,
+    ver: u32,
+    crc: u32,
+}
+
+impl<T> DiskObject<T>
+where
+    T: RTA,
+{
+    #[inline]
+    fn valid(&self) -> bool {
+        crc32(to_bytes(&self.obj)) == self.crc
+    }
+}
+
+#[inline]
+const fn to_bytes<T: RTA>(t: &T) -> &[u8] {
+    unsafe { slice::from_raw_parts(t as *const T as *const u8, T::SIZE) }
 }
 
 #[inline]
@@ -212,48 +279,4 @@ fn crc32(bytes: &[u8]) -> u32 {
     }
 
     crc
-}
-
-#[repr(C)]
-struct DiskInterface<T: RTA> {
-    hash: u64,
-    obja: DiskObject<T>,
-    objb: DiskObject<T>,
-}
-
-impl<T> DiskInterface<T>
-where
-    T: RTA,
-{
-    #[inline]
-    fn select_oldest_mut(&mut self) -> &mut DiskObject<T> {
-        if self.obja.ver <= self.objb.ver {
-            &mut self.obja
-        } else {
-            &mut self.objb
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Clone)]
-struct DiskObject<T: RTA> {
-    obj: T,
-    ver: u32,
-    crc: u32,
-}
-
-impl<T> DiskObject<T>
-where
-    T: RTA,
-{
-    #[inline]
-    fn valid(&self) -> bool {
-        crc32(to_bytes(&self.obj)) == self.crc
-    }
-}
-
-#[inline]
-const fn to_bytes<T: Sized>(t: &T) -> &[u8] {
-    unsafe { slice::from_raw_parts(t as *const T as *const u8, core::mem::size_of::<T>()) }
 }

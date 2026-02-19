@@ -1,45 +1,50 @@
 use rta::{Rta, RTA};
+use std::sync::atomic::{AtomicU16, Ordering};
 
 #[repr(C)]
-#[derive(Default, Clone, RTA)]
+#[derive(Default, RTA)]
 struct Meta {
-    id: u64,
+    id: AtomicU16,
     name: &'static str,
 }
 
 #[test]
 fn basic() {
-    let dir = std::path::PathBuf::from("/tmp/frozen-core/examples");
+    let dir = std::path::PathBuf::from("/tmp/rta/examples");
     std::fs::create_dir_all(&dir).expect("create example dir");
 
-    let path = dir.join("ff_example.bin");
+    let path = dir.join("metadata.bin");
     if path.exists() {
         std::fs::remove_file(&path).expect("remove existing");
     }
 
-    let rta = Rta::<Meta>::new(path.clone()).expect("init");
+    let rta = Rta::<Meta>::new(path.as_os_str().as_encoded_bytes().to_vec()).expect("init");
 
     let default = Meta::default();
     assert_eq!(std::mem::size_of_val(&default), Meta::SIZE);
 
-    let initial = rta.read().expect("read");
-    assert_eq!(std::mem::size_of_val(&initial), Meta::SIZE);
+    rta.read(|m| {
+        assert_eq!(std::mem::size_of_val(m), Meta::SIZE);
+        assert_eq!(m.id.load(Ordering::Relaxed), default.id.load(Ordering::Relaxed));
+        assert_eq!(m.name, default.name);
+    })
+    .expect("read initial");
 
-    assert_eq!(initial.id, default.id);
-    assert_eq!(initial.name, default.name);
-
-    let m = Meta {
-        id: 0x20,
+    let meta = Meta {
+        id: AtomicU16::new(0x10),
         name: "Metadata",
     };
-    assert!(rta.write(&m).is_ok());
+    rta.write(|m| *m = meta).expect("write update");
 
     drop(rta);
 
-    let rta = Rta::<Meta>::open(path.clone()).expect("re_init");
-    let persisted = rta.read().expect("read_back");
+    let rta = Rta::<Meta>::new(path.as_os_str().as_encoded_bytes().to_vec()).expect("init");
+    rta.read(|m| {
+        assert_eq!(std::mem::size_of_val(m), Meta::SIZE);
+        assert_eq!(m.id.load(Ordering::Relaxed), 0x10);
+        assert_eq!(m.name, "Metadata");
+    })
+    .expect("read initial");
 
-    assert_eq!(std::mem::size_of_val(&persisted), Meta::SIZE);
-    assert_eq!(persisted.id, m.id);
-    assert_eq!(persisted.name, m.name);
+    let _ = std::fs::remove_file(&path);
 }
