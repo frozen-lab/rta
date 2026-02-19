@@ -15,8 +15,8 @@ use syn::{parse_macro_input, Data, DeriveInput};
 ///
 /// ## Why?
 ///
-/// `#[derive(RTA)]` implementation, computes a compile time `HASH`, which is used as unique
-/// and deterministic id for a given type `T`
+/// `#[derive(RTA)]` implementation, computes `core::mem::size_of::<T>()` and a compile time `HASH`,
+/// which is used as unique and deterministic id for a given type `T`
 ///
 /// This is to track any changes in the implementation of type `T`
 #[proc_macro_derive(RTA)]

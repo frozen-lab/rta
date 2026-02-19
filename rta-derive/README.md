@@ -4,7 +4,7 @@ Procedural macro implementation for `#[derive(RTA)]`
 
 ## `RTA`
 
-It computes a deterministic hash(u64) at _compile time_ for given struct `T` using,
+It computes a size of `T` and a deterministic hash(u64) at _compile time_ for given struct `T` using,
 
 - name of `T`
 - ordered list of field types in `T`

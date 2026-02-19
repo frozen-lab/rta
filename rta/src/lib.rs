@@ -1,9 +1,6 @@
 use core::{marker::PhantomData, slice};
-use frozen_core::{
-    fe::FRes,
-    ff::{FFCfg, FrozenFile},
-    fm::{FMCfg, FrozenMMap},
-};
+use frozen_core::{error, ffile, fmmap};
+use std::os::unix::ffi::OsStrExt;
 
 /// module id for [`Rta`] is `1`
 const MOD_ID: u8 = 1;
@@ -32,9 +29,8 @@ pub unsafe trait RTA: Clone + Sized + Default {
 }
 
 pub struct Rta<T: RTA> {
-    mmap: FrozenMMap,
+    mmap: fmmap::FrozenMMap,
     lock: std::sync::Mutex<()>,
-    _file: FrozenFile,
     _type: PhantomData<T>,
 }
 
@@ -44,7 +40,7 @@ where
 {
     const FILE_SIZE: usize = core::mem::size_of::<DiskInterface<T>>();
 
-    pub fn new(path: std::path::PathBuf) -> FRes<Self> {
+    pub fn new(path: std::path::PathBuf) -> error::FrozenRes<Self> {
         if path.exists() {
             panic!("invalid path, path to already existing file");
         }
@@ -53,18 +49,14 @@ where
             panic!("path must be of a file, not dir");
         }
 
-        let file_cfg = FFCfg {
-            path,
-            module_id: MOD_ID,
-        };
-        let mmap_cfg = FMCfg {
+        let mmap_cfg = fmmap::FMCfg {
             auto_flush: true,
             module_id: MOD_ID,
             flush_duration: DEFAULT_FLUSH_DURATION,
         };
 
-        let file = FrozenFile::new(file_cfg, Self::FILE_SIZE as u64)?;
-        let mmap = FrozenMMap::new(file.fd(), Self::FILE_SIZE, mmap_cfg)?;
+        let file = ffile::FrozenFile::new(path.as_os_str().as_bytes().to_vec(), Self::FILE_SIZE as u64, MOD_ID)?;
+        let mmap = fmmap::FrozenMMap::new(file, Self::FILE_SIZE, mmap_cfg)?;
 
         {
             let writer = mmap.writer::<DiskInterface<T>>(0)?;
@@ -81,13 +73,12 @@ where
 
         Ok(Self {
             mmap,
-            _file: file,
             _type: PhantomData,
             lock: std::sync::Mutex::new(()),
         })
     }
 
-    pub fn open(path: std::path::PathBuf) -> FRes<Self> {
+    pub fn open(path: std::path::PathBuf) -> error::FrozenRes<Self> {
         if !path.exists() {
             panic!("Rta does not exists");
         }
@@ -96,18 +87,14 @@ where
             panic!("Path is not a file");
         }
 
-        let file_cfg = FFCfg {
-            path,
-            module_id: MOD_ID,
-        };
-        let mmap_cfg = FMCfg {
+        let mmap_cfg = fmmap::FMCfg {
             module_id: MOD_ID,
             auto_flush: true,
             flush_duration: DEFAULT_FLUSH_DURATION,
         };
 
-        let file = FrozenFile::open(file_cfg)?;
-        let mmap = FrozenMMap::new(file.fd(), Self::FILE_SIZE, mmap_cfg)?;
+        let file = ffile::FrozenFile::new(path.as_os_str().as_bytes().to_vec(), Self::FILE_SIZE as u64, MOD_ID)?;
+        let mmap = fmmap::FrozenMMap::new(file, Self::FILE_SIZE, mmap_cfg)?;
 
         {
             let r = mmap.reader::<DiskInterface<T>>(0)?;
@@ -127,7 +114,6 @@ where
 
         Ok(Self {
             mmap,
-            _file: file,
             _type: PhantomData,
             lock: std::sync::Mutex::new(()),
         })
@@ -142,7 +128,7 @@ where
     }
 
     #[inline(always)]
-    pub fn read(&self) -> FRes<T> {
+    pub fn read(&self) -> error::FrozenRes<T> {
         let r = self.mmap.reader::<DiskInterface<T>>(0)?;
         let val = r.read(|di| {
             let a_valid = di.obja.valid();
@@ -166,7 +152,7 @@ where
     }
 
     #[inline(always)]
-    pub fn write(&self, new_val: &T) -> FRes<()> {
+    pub fn write(&self, new_val: &T) -> error::FrozenRes<()> {
         let _g = self.lock.lock().unwrap();
         let w = self.mmap.writer::<DiskInterface<T>>(0)?;
 
