@@ -5,20 +5,37 @@ use frozen_core::{
     fm::{FMCfg, FrozenMMap},
 };
 
-const MOD_ID: u8 = 0x01;
-const FLUSH_DURATION: std::time::Duration = std::time::Duration::from_millis(250);
+/// module id for [`Rta`] is `1`
+const MOD_ID: u8 = 1;
+
+/// default flush duration for [`FrozenMMap`], we perform sync at interval of `256 ms`
+const DEFAULT_FLUSH_DURATION: std::time::Duration = std::time::Duration::from_millis(0x100);
 
 pub use rta_derive::RTA;
 
+/// Derives the `rta::RTA` trait for a struct `T`
+///
+/// ## Important
+///
+/// - type `T` must use `repr(C)`
+/// - should not implement Drop (to avoid undefined behaviour)
+///
+/// ## Why?
+///
+/// `#[derive(RTA)]` implementation, computes a compile time `HASH`, which is used as unique
+/// and deterministic id for a given type `T`
+///
+/// This is to track any changes in the implementation of type `T`
 pub unsafe trait RTA: Clone + Sized + Default {
     const HASH: u64;
+    const SIZE: usize;
 }
 
 pub struct Rta<T: RTA> {
     mmap: FrozenMMap,
-    _file: FrozenFile,
-    _marker: PhantomData<T>,
     lock: std::sync::Mutex<()>,
+    _file: FrozenFile,
+    _type: PhantomData<T>,
 }
 
 impl<T> Rta<T>
@@ -41,13 +58,13 @@ where
             module_id: MOD_ID,
         };
         let mmap_cfg = FMCfg {
-            module_id: MOD_ID,
             auto_flush: true,
-            flush_duration: FLUSH_DURATION,
+            module_id: MOD_ID,
+            flush_duration: DEFAULT_FLUSH_DURATION,
         };
 
-        let _file = FrozenFile::new(file_cfg, Self::FILE_SIZE as u64)?;
-        let mmap = FrozenMMap::new(_file.fd(), Self::FILE_SIZE, mmap_cfg)?;
+        let file = FrozenFile::new(file_cfg, Self::FILE_SIZE as u64)?;
+        let mmap = FrozenMMap::new(file.fd(), Self::FILE_SIZE, mmap_cfg)?;
 
         {
             let writer = mmap.writer::<DiskInterface<T>>(0)?;
@@ -56,16 +73,16 @@ where
 
                 di.obja.obj = T::default();
                 di.obja.ver = 1;
-                di.obja.crc = crc32(Self::to_bytes(&di.obja.obj));
+                di.obja.crc = crc32(to_bytes(&di.obja.obj));
 
                 di.objb = di.obja.clone();
             })?;
         }
 
         Ok(Self {
-            _file,
             mmap,
-            _marker: PhantomData,
+            _file: file,
+            _type: PhantomData,
             lock: std::sync::Mutex::new(()),
         })
     }
@@ -86,11 +103,11 @@ where
         let mmap_cfg = FMCfg {
             module_id: MOD_ID,
             auto_flush: true,
-            flush_duration: FLUSH_DURATION,
+            flush_duration: DEFAULT_FLUSH_DURATION,
         };
 
-        let _file = FrozenFile::open(file_cfg)?;
-        let mmap = FrozenMMap::new(_file.fd(), Self::FILE_SIZE, mmap_cfg)?;
+        let file = FrozenFile::open(file_cfg)?;
+        let mmap = FrozenMMap::new(file.fd(), Self::FILE_SIZE, mmap_cfg)?;
 
         {
             let r = mmap.reader::<DiskInterface<T>>(0)?;
@@ -99,8 +116,8 @@ where
                     panic!("metadata hash mismatch");
                 }
 
-                let a = Self::valid(&di.obja);
-                let b = Self::valid(&di.objb);
+                let a = di.obja.valid();
+                let b = di.objb.valid();
 
                 if !a && !b {
                     panic!("both metadata copies corrupt");
@@ -109,9 +126,9 @@ where
         }
 
         Ok(Self {
-            _file,
             mmap,
-            _marker: PhantomData,
+            _file: file,
+            _type: PhantomData,
             lock: std::sync::Mutex::new(()),
         })
     }
@@ -128,8 +145,8 @@ where
     pub fn read(&self) -> FRes<T> {
         let r = self.mmap.reader::<DiskInterface<T>>(0)?;
         let val = r.read(|di| {
-            let a_valid = Self::valid(&di.obja);
-            let b_valid = Self::valid(&di.objb);
+            let a_valid = di.obja.valid();
+            let b_valid = di.objb.valid();
 
             match (a_valid, b_valid) {
                 (true, true) => {
@@ -155,33 +172,14 @@ where
 
         w.write(|di| {
             let max_ver = di.obja.ver.max(di.objb.ver);
-            let target = Self::select_oldest_mut(di);
+            let target = di.select_oldest_mut();
 
             target.obj = new_val.clone();
             target.ver = max_ver.wrapping_add(1);
-            target.crc = crc32(Self::to_bytes(&target.obj));
+            target.crc = crc32(to_bytes(&target.obj));
         })?;
 
         Ok(())
-    }
-
-    #[inline]
-    fn to_bytes(t: &T) -> &[u8] {
-        unsafe { slice::from_raw_parts(t as *const T as *const u8, Self::size()) }
-    }
-
-    #[inline]
-    fn select_oldest_mut(di: &mut DiskInterface<T>) -> &mut DiskObject<T> {
-        if di.obja.ver <= di.objb.ver {
-            &mut di.obja
-        } else {
-            &mut di.objb
-        }
-    }
-
-    #[inline]
-    fn valid(obj: &DiskObject<T>) -> bool {
-        crc32(Self::to_bytes(&obj.obj)) == obj.crc
     }
 }
 
@@ -237,10 +235,39 @@ struct DiskInterface<T: RTA> {
     objb: DiskObject<T>,
 }
 
+impl<T> DiskInterface<T>
+where
+    T: RTA,
+{
+    #[inline]
+    fn select_oldest_mut(&mut self) -> &mut DiskObject<T> {
+        if self.obja.ver <= self.objb.ver {
+            &mut self.obja
+        } else {
+            &mut self.objb
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone)]
 struct DiskObject<T: RTA> {
     obj: T,
     ver: u32,
     crc: u32,
+}
+
+impl<T> DiskObject<T>
+where
+    T: RTA,
+{
+    #[inline]
+    fn valid(&self) -> bool {
+        crc32(to_bytes(&self.obj)) == self.crc
+    }
+}
+
+#[inline]
+const fn to_bytes<T: Sized>(t: &T) -> &[u8] {
+    unsafe { slice::from_raw_parts(t as *const T as *const u8, core::mem::size_of::<T>()) }
 }

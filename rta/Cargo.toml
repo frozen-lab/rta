@@ -5,13 +5,13 @@ version = "0.0.1"
 readme = "../README.md"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/frozen-lab/rta"
+categories = ["caching", "database-implementations"]
 keywords = ["rta", "database", "persistence", "storage"]
-categories = ["caching", "configuration", "database-implementations"]
 description = "Ṛta (ऋत) is a minimal metadata store for durable system state"
 
 [dependencies]
 frozen-core = {version = "0.0.4", features = ["ff", "fm"]}
-rta-derive = {version = "0.1.0", path = "../rta-derive"}
+rta-derive = {version = "0.1.1", path = "../rta-derive"}
 
 [dev-dependencies]
 tempfile = "3.20.0"

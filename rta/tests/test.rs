@@ -20,7 +20,10 @@ fn basic() {
     let rta = Rta::<Meta>::new(path.clone()).expect("init");
 
     let default = Meta::default();
+    assert_eq!(std::mem::size_of_val(&default), Meta::SIZE);
+
     let initial = rta.read().expect("read");
+    assert_eq!(std::mem::size_of_val(&initial), Meta::SIZE);
 
     assert_eq!(initial.id, default.id);
     assert_eq!(initial.name, default.name);
@@ -36,6 +39,7 @@ fn basic() {
     let rta = Rta::<Meta>::open(path.clone()).expect("re_init");
     let persisted = rta.read().expect("read_back");
 
+    assert_eq!(std::mem::size_of_val(&persisted), Meta::SIZE);
     assert_eq!(persisted.id, m.id);
     assert_eq!(persisted.name, m.name);
 }
