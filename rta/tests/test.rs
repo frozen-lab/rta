@@ -1,5 +1,6 @@
 use rta::{Rta, RTA};
 use std::sync::atomic::{AtomicU16, Ordering};
+use tempfile::tempdir;
 
 #[repr(C)]
 #[derive(Default, RTA)]
@@ -8,43 +9,129 @@ struct Meta {
     name: &'static str,
 }
 
-#[test]
-fn basic() {
-    let dir = std::path::PathBuf::from("/tmp/rta/examples");
-    std::fs::create_dir_all(&dir).expect("create example dir");
-
-    let path = dir.join("metadata.bin");
-    if path.exists() {
-        std::fs::remove_file(&path).expect("remove existing");
-    }
+fn new_rta() -> (tempfile::TempDir, std::path::PathBuf, Rta<Meta>) {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("meta.bin");
 
     let rta = Rta::<Meta>::new(path.as_os_str().as_encoded_bytes().to_vec()).expect("init");
 
-    let default = Meta::default();
-    assert_eq!(std::mem::size_of_val(&default), Meta::SIZE);
+    (dir, path, rta)
+}
+
+#[test]
+fn bootstrap_is_default() {
+    let (_dir, _path, rta) = new_rta();
 
     rta.read(|m| {
-        assert_eq!(std::mem::size_of_val(m), Meta::SIZE);
-        assert_eq!(m.id.load(Ordering::Relaxed), default.id.load(Ordering::Relaxed));
-        assert_eq!(m.name, default.name);
+        assert_eq!(m.id.load(Ordering::Relaxed), 0);
+        assert_eq!(m.name, "");
     })
-    .expect("read initial");
+    .expect("read");
+}
 
-    let meta = Meta {
-        id: AtomicU16::new(0x10),
-        name: "Metadata",
-    };
-    rta.write(|m| *m = meta).expect("write update");
+#[test]
+fn write_and_reopen_persists() {
+    let (_dir, path, rta) = new_rta();
+
+    rta.write(|m| {
+        m.id.store(42, Ordering::Relaxed);
+        m.name = "hello";
+    })
+    .expect("write");
 
     drop(rta);
 
-    let rta = Rta::<Meta>::new(path.as_os_str().as_encoded_bytes().to_vec()).expect("init");
-    rta.read(|m| {
-        assert_eq!(std::mem::size_of_val(m), Meta::SIZE);
-        assert_eq!(m.id.load(Ordering::Relaxed), 0x10);
-        assert_eq!(m.name, "Metadata");
-    })
-    .expect("read initial");
+    let rta = Rta::<Meta>::new(path.as_os_str().as_encoded_bytes().to_vec()).expect("reopen");
 
-    let _ = std::fs::remove_file(&path);
+    rta.read(|m| {
+        assert_eq!(m.id.load(Ordering::Relaxed), 42);
+        assert_eq!(m.name, "hello");
+    })
+    .expect("read");
+}
+
+#[test]
+fn multiple_writes_keep_latest() {
+    let (_dir, _path, rta) = new_rta();
+
+    for i in 0..10 {
+        rta.write(|m| {
+            m.id.store(i, Ordering::Relaxed);
+        })
+        .expect("write");
+    }
+
+    rta.read(|m| {
+        assert_eq!(m.id.load(Ordering::Relaxed), 9);
+    })
+    .expect("read");
+}
+
+#[test]
+fn concurrent_reads_are_safe() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let (_dir, _path, rta) = new_rta();
+    let rta = Arc::new(rta);
+
+    rta.write(|m| {
+        m.id.store(7, Ordering::Relaxed);
+    })
+    .expect("write");
+
+    let mut handles = vec![];
+
+    for _ in 0..8 {
+        let r = rta.clone();
+        handles.push(thread::spawn(move || {
+            r.read(|m| {
+                assert_eq!(m.id.load(Ordering::Relaxed), 7);
+            })
+            .expect("read");
+        }));
+    }
+
+    for h in handles {
+        h.join().expect("join");
+    }
+}
+
+#[test]
+fn version_monotonicity() {
+    let (_dir, _path, rta) = new_rta();
+
+    for i in 0..100 {
+        rta.write(|m| {
+            m.id.store(i, Ordering::Relaxed);
+        })
+        .expect("write");
+    }
+
+    rta.read(|m| {
+        assert_eq!(m.id.load(Ordering::Relaxed), 99);
+    })
+    .expect("read");
+}
+
+#[repr(C)]
+#[derive(Default, RTA)]
+struct DifferentMeta {
+    id: AtomicU16,
+}
+
+#[test]
+fn hash_mismatch_detection() {
+    let (_dir, path, rta) = new_rta();
+
+    rta.write(|m| {
+        m.id.store(99, Ordering::Relaxed);
+    })
+    .expect("write");
+
+    drop(rta);
+
+    let result = Rta::<DifferentMeta>::new(path.as_os_str().as_encoded_bytes().to_vec());
+
+    assert!(result.is_err());
 }
