@@ -12,7 +12,7 @@ struct Meta {
     name: &'static str,
 }
 
-#[repr(C)]
+#[repr(C, align(8))]
 #[derive(Default, RTA)]
 struct DifferentMeta {
     id: AtomicU16,
@@ -21,9 +21,7 @@ struct DifferentMeta {
 fn new_tmp() -> (TempDir, PathBuf, Rta<Meta>) {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("meta.bin");
-
-    let path_bytes = path.as_os_str().as_encoded_bytes().to_vec();
-    let rta = Rta::<Meta>::new(path_bytes).expect("new RTA");
+    let rta = Rta::<Meta>::new(&path).expect("new RTA");
 
     (dir, path, rta)
 }
@@ -53,7 +51,7 @@ mod new {
 
         drop(rta);
 
-        let result = Rta::<DifferentMeta>::new(path.as_os_str().as_encoded_bytes().to_vec());
+        let result = Rta::<DifferentMeta>::new(&path);
 
         assert!(result.is_err());
     }
@@ -91,7 +89,7 @@ mod write_read {
 
         drop(rta);
 
-        let rta = Rta::<Meta>::new(path.as_os_str().as_encoded_bytes().to_vec()).expect("reopen");
+        let rta = Rta::<Meta>::new(&path).expect("reopen");
 
         rta.read(|m| {
             assert_eq!(m.id.load(Ordering::Relaxed), 42);
