@@ -23,20 +23,42 @@ use syn::{parse_macro_input, Data, DeriveInput};
 pub fn derive_rta(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let ident = input.ident;
+
+    if !has_repr_c(&input.attrs) {
+        return syn::Error::new_spanned(ident, "RTA derive error: struct must use #[repr(C)] for stable layout")
+            .to_compile_error()
+            .into();
+    }
+
     let mut hash = hasher::hash(0, ident.to_string().as_bytes());
 
     let fields = match input.data {
         Data::Struct(s) => s.fields,
         _ => {
-            return syn::Error::new_spanned(ident, "RTA can only be derived for a struct")
+            return syn::Error::new_spanned(ident, "RTA derive error: RTA can only be derived for a struct")
                 .to_compile_error()
                 .into();
         }
     };
 
+    let field_sizes: Vec<_> = fields
+        .iter()
+        .map(|f| {
+            let ty = &f.ty;
+            quote! { core::mem::size_of::<#ty>() }
+        })
+        .collect();
+
     for field in fields {
+        if let Some(ident) = field.ident {
+            hash = hasher::hash(hash, b"|");
+            hash = hasher::hash(hash, ident.to_string().as_bytes());
+        }
+
         let ty = field.ty;
         let ty_str = quote!(#ty).to_string();
+
+        hash = hasher::hash(hash, b":");
         hash = hasher::hash(hash, ty_str.as_bytes());
     }
 
@@ -45,9 +67,56 @@ pub fn derive_rta(input: TokenStream) -> TokenStream {
             const HASH: u64 = #hash;
             const SIZE: usize = core::mem::size_of::<Self>();
         }
+
+        const _: () = {
+            let field_sum =
+                0 #( + #field_sizes )*;
+
+            assert!(
+                core::mem::size_of::<#ident>() > 0,
+                concat!(
+                    "RTA derive error: struct `",
+                    stringify!(#ident),
+                    "` cannot be zero-sized"
+                )
+            );
+
+            assert!(
+                core::mem::size_of::<#ident>() == field_sum,
+                concat!(
+                    "RTA derive error: struct `",
+                    stringify!(#ident),
+                    "` contains padding. ",
+                    "All fields must pack exactly with #[repr(C)]. ",
+                    "Reorder fields or add explicit padding fields."
+                )
+            );
+
+            assert!(
+                core::mem::size_of::<#ident>() % 8 == 0,
+                concat!(
+                    "RTA derive error: struct `",
+                    stringify!(#ident),
+                    "` size must be a multiple of 8 bytes ",
+                    "Add padding fields or reorder members."
+                )
+            );
+        };
     };
 
     TokenStream::from(expanded)
+}
+
+fn has_repr_c(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("repr") {
+            return false;
+        }
+
+        attr.parse_args_with(syn::punctuated::Punctuated::<syn::Ident, syn::Token![,]>::parse_terminated)
+            .map(|idents| idents.iter().any(|i| i == "C"))
+            .unwrap_or(false)
+    })
 }
 
 mod hasher {
