@@ -1,5 +1,14 @@
 # Changelog
 
+## `0.3.0`
+
+- Compile-time checks for `#[derive(RTA)]`
+- Improved Docs
+
+## `0.2.0`
+
+- Impl of `T::SIZE`
+
 ## `0.1.0`
 
 - Added docs
