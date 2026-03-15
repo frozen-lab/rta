@@ -1,17 +1,33 @@
 [package]
-name = "rta"
 edition = "2024"
-version = "0.0.3"
+name = "rta"
+version = "0.0.2"
+description = "Ṛta (ऋत) is a minimal metadata store for durable system state"
 readme = "../README.md"
+keywords = [
+    "rta",
+    "database",
+    "persistence",
+    "storage",
+]
+categories = ["caching"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/frozen-lab/rta"
-categories = ["caching", "database-implementations"]
-keywords = ["rta", "database", "persistence", "storage"]
-description = "Ṛta (ऋत) is a minimal metadata store for durable system state"
 
-[dependencies]
-rta-derive = {version = "0.2", path = "../rta-derive"}
-frozen-core = {version = "0.0.12", default-features = false, features = ["fmmap", "crc32"]}
+[lib]
+name = "rta"
+path = "src/lib.rs"
 
-[dev-dependencies]
-tempfile = "3.20.0"
+[dependencies.frozen-core]
+version = "0.0.12"
+default-features = false
+features = [
+    "crc32",
+    "fmmap",
+]
+
+[dependencies.rta-derive]
+version = "0.2.0"
+
+[dev-dependencies.tempfile]
+version = "3.20.0"
