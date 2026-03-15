@@ -1,9 +1,9 @@
-use core::slice;
 use frozen_core::{
     crc32::Crc32C,
     error::FrozenRes,
     fmmap::{FMCfg, FrozenMMap},
 };
+use std::{slice, sync, time};
 
 pub use rta_derive::RTA;
 
@@ -11,7 +11,14 @@ pub use rta_derive::RTA;
 const MOD_ID: u8 = 1;
 
 /// default flush duration for [`FrozenMMap`], we perform sync at interval of `256 ms`
-const DEFAULT_FLUSH_DURATION: std::time::Duration = std::time::Duration::from_millis(0x100);
+const DEFAULT_FLUSH_DURATION: std::time::Duration = time::Duration::from_millis(0x100);
+
+static CRC32: sync::OnceLock<Crc32C> = sync::OnceLock::new();
+
+#[inline(always)]
+fn crc32() -> &'static Crc32C {
+    CRC32.get().expect("CRC32 OnceLock not initialized")
+}
 
 /// Derives the `rta::RTA` trait for a struct `T`
 ///
@@ -36,7 +43,6 @@ pub unsafe trait RTA: Sized + Default {
 
 /// Ṛta (ऋत) is a minimal metadata store for durable system state
 pub struct Rta<T: RTA + Send + Sync> {
-    crc32: Crc32C,
     lock: std::sync::Mutex<()>,
     mmap: FrozenMMap<DiskInterface<T>>,
 }
@@ -47,32 +53,30 @@ where
 {
     /// Create a new instance of [`Rta`]
     pub fn new(path: &std::path::Path) -> FrozenRes<Self> {
-        let crc32 = Crc32C::default();
-
-        let cfg = FMCfg {
+        let _ = CRC32.get_or_init(|| Crc32C::default());
+        let mmap = FrozenMMap::<DiskInterface<T>>::new(FMCfg {
             mid: MOD_ID,
             initial_count: 2,
             path: path.to_path_buf(),
             flush_duration: DEFAULT_FLUSH_DURATION,
-        };
-        let mmap = FrozenMMap::<DiskInterface<T>>::new(cfg)?;
+        })?;
 
-        Self::init_if_new(&mmap, &crc32)?;
+        Self::init_if_new(&mmap)?;
 
         Ok(Self {
             mmap,
-            crc32,
             lock: std::sync::Mutex::new(()),
         })
     }
 
+    #[inline(always)]
     pub fn read<R>(&self, f: impl FnOnce(&T) -> R) -> FrozenRes<R> {
         let result = self.mmap.read(0, |di| {
-            let a_crc = self.crc32.crc(to_bytes(&di.obja.obj));
-            let b_crc = self.crc32.crc(to_bytes(&di.objb.obj));
+            let byte_slice = [to_bytes(&di.obja.obj), to_bytes(&di.objb.obj)];
+            let slice = crc32().crc_2x(byte_slice);
 
-            let a_valid = di.obja.valid(a_crc);
-            let b_valid = di.objb.valid(b_crc);
+            let a_valid = di.obja.valid(slice[0]);
+            let b_valid = di.objb.valid(slice[1]);
 
             let chosen = match (a_valid, b_valid) {
                 (true, true) => {
@@ -104,6 +108,7 @@ where
         }
     }
 
+    #[inline(always)]
     pub fn write(&self, f: impl FnOnce(&mut T)) -> FrozenRes<()> {
         let _g = self.lock.lock().expect("Rta write lock poisoned");
 
@@ -114,22 +119,22 @@ where
             f(&mut target.obj);
 
             target.ver = max_ver.wrapping_add(1);
-            target.crc = self.crc32.crc(to_bytes(&target.obj));
+            target.crc = crc32().crc(to_bytes(&target.obj));
         })?;
 
         Ok(())
     }
 
-    fn init_if_new(mmap: &FrozenMMap<DiskInterface<T>>, crc32: &Crc32C) -> FrozenRes<()> {
+    fn init_if_new(mmap: &FrozenMMap<DiskInterface<T>>) -> FrozenRes<()> {
         match mmap.read(0, |di| {
-            let crc_a = crc32.crc(to_bytes(&di.obja.obj));
-            let crc_b = crc32.crc(to_bytes(&di.objb.obj));
+            let byte_slice = [to_bytes(&di.obja.obj), to_bytes(&di.objb.obj)];
+            let slice = crc32().crc_2x(byte_slice);
 
-            di.state(crc_a, crc_b)
+            di.state(slice[0], slice[1])
         })? {
             DIState::Valid => {}
             DIState::Uninitialized => {
-                let _ = mmap.write_sync(0, |di| di.bootstrap(crc32))?;
+                let _ = mmap.write_sync(0, |di| di.bootstrap())?;
             }
             DIState::HashMismatch => {
                 return Err(frozen_core::error::FrozenErr::new(
@@ -173,7 +178,7 @@ impl<T> DiskInterface<T>
 where
     T: RTA,
 {
-    #[inline]
+    #[inline(always)]
     fn state(&self, crc_a: u32, crc_b: u32) -> DIState {
         if self.hash == 0 {
             return DIState::Uninitialized;
@@ -190,10 +195,9 @@ where
         DIState::Corrupted
     }
 
-    #[inline]
-    fn bootstrap(&mut self, crc32: &Crc32C) {
+    fn bootstrap(&mut self) {
         let default = T::default();
-        let crc = crc32.crc(to_bytes(&default));
+        let crc = crc32().crc(to_bytes(&default));
 
         self.hash = T::HASH;
 
@@ -207,7 +211,7 @@ where
         self.objb.crc = 0;
     }
 
-    #[inline]
+    #[inline(always)]
     fn select_oldest_mut(&mut self) -> &mut DiskObject<T> {
         if self.obja.ver <= self.objb.ver {
             &mut self.obja

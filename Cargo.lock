@@ -190,15 +190,13 @@ name = "rta"
 version = "0.0.2"
 dependencies = [
  "frozen-core",
- "rta-derive 0.2.0",
+ "rta-derive 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "tempfile",
 ]
 
 [[package]]
 name = "rta-derive"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a7b0813b3b0d835800af59f931c6fa730c8bc1728a02eba491e814de274f4f7"
+version = "0.3.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -208,6 +206,8 @@ dependencies = [
 [[package]]
 name = "rta-derive"
 version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e56e6b21828d142a0ee19071e64fe6196b133e4fdfa3aa60efc4f2902c1e1f48"
 dependencies = [
  "proc-macro2",
  "quote",
