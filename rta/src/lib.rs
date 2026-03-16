@@ -1,23 +1,52 @@
 use frozen_core::{
     crc32::Crc32C,
-    error::FrozenRes,
+    error::{ErrCode, FrozenErr},
     fmmap::{FMCfg, FrozenMMap},
 };
 use std::{slice, sync, time};
 
+/// Procedural macro implementation for `#[derive(RTA)]`
 pub use rta_derive::RTA;
 
-/// module id for [`Rta`] is `1`
-const MOD_ID: u8 = 1;
+/// Domain Id for [`Rta`] is **20**
+const ERRDOMAIN: u8 = 0x14;
 
-/// default flush duration for [`FrozenMMap`], we perform sync at interval of `256 ms`
-const DEFAULT_FLUSH_DURATION: std::time::Duration = time::Duration::from_millis(0x100);
+/// module id used for [`FrozenErr`]
+static MODULE_ID: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
 
+#[inline(always)]
+fn mod_id() -> &'static u8 {
+    MODULE_ID.get_or_init(|| 0)
+}
+
+/// crc backend used for calculating checksum
 static CRC32: sync::OnceLock<Crc32C> = sync::OnceLock::new();
 
 #[inline(always)]
 fn crc32() -> &'static Crc32C {
     CRC32.get().expect("CRC32 OnceLock not initialized")
+}
+
+/// Error codes for [`FrozenPipe`]
+mod err {
+    use super::ErrCode;
+
+    /// (1280) all copies are corrupted
+    pub const CRP: ErrCode = ErrCode::new(0x500, "All copies of `T` are corrupted");
+
+    /// (1281) invalid hash for T
+    pub const HSH: ErrCode = ErrCode::new(0x500, "`T` has HASH mismatch as it may be updated after being stored");
+}
+
+#[inline]
+fn new_err<R>(code: ErrCode) -> RtaRes<R> {
+    let err = FrozenErr::new(*mod_id(), ERRDOMAIN, code, "");
+    Err(err.into())
+}
+
+#[inline]
+fn new_err_raw(code: ErrCode) -> RtaErr {
+    FrozenErr::new(*mod_id(), ERRDOMAIN, code, "").into()
 }
 
 /// Derives the `rta::RTA` trait for a struct `T`
@@ -41,6 +70,28 @@ pub unsafe trait RTA: Sized + Default {
     const SIZE: usize;
 }
 
+/// Custom result type w/ [`RtaErr`] as error type
+pub type RtaRes<T> = Result<T, RtaErr>;
+
+/// Utility for error propagation used for [`Rta`]
+#[derive(Debug, Clone)]
+pub struct RtaErr {
+    /// Encoded 32-bit unique identifier
+    pub id: u32,
+
+    /// Formated string w/ added context describing the error
+    pub context: String,
+}
+
+impl From<FrozenErr> for RtaErr {
+    fn from(value: FrozenErr) -> Self {
+        Self {
+            id: value.id,
+            context: value.context,
+        }
+    }
+}
+
 /// Ṛta (ऋत) is a minimal metadata store for durable system state
 pub struct Rta<T: RTA + Send + Sync> {
     lock: std::sync::Mutex<()>,
@@ -49,16 +100,25 @@ pub struct Rta<T: RTA + Send + Sync> {
 
 impl<T> Rta<T>
 where
-    T: RTA + Sized + Default + Send + Sync,
+    T: Default + RTA + Send + Sized + Sync,
 {
     /// Create a new instance of [`Rta`]
-    pub fn new(path: &std::path::Path) -> FrozenRes<Self> {
+    pub fn new<P: AsRef<std::path::Path>, const MID: u8>(path: P, flush_duration: time::Duration) -> RtaRes<Self> {
+        // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees that the
+        // first caller sets the value and all subsequent calls reuse it
+        let _ = MODULE_ID.get_or_init(|| MID);
+
+        // INFO: Crc32C selects the optimal backend (hardware or software) at runtime w/ respect to hardware
+        //
+        // NOTE: Since, the value is used across objects, we initialize it once and pin it in a global `OnceLock`
+        // to avoid repeated setup and reference passing
         let _ = CRC32.get_or_init(|| Crc32C::default());
+
         let mmap = FrozenMMap::<DiskInterface<T>>::new(FMCfg {
-            mid: MOD_ID,
-            initial_count: 2,
-            path: path.to_path_buf(),
-            flush_duration: DEFAULT_FLUSH_DURATION,
+            flush_duration,
+            mid: MID,
+            initial_count: 1,
+            path: path.as_ref().to_path_buf(),
         })?;
 
         Self::init_if_new(&mmap)?;
@@ -70,7 +130,7 @@ where
     }
 
     #[inline(always)]
-    pub fn read<R>(&self, f: impl FnOnce(&T) -> R) -> FrozenRes<R> {
+    pub fn read<R>(&self, f: impl FnOnce(&T) -> R) -> RtaRes<R> {
         let result = self.mmap.read(0, |di| {
             let byte_slice = [to_bytes(&di.obja.obj), to_bytes(&di.objb.obj)];
             let slice = crc32().crc_2x(byte_slice);
@@ -95,21 +155,13 @@ where
         });
 
         match result {
-            Ok(res) => res.ok_or_else(|| {
-                frozen_core::error::FrozenErr::new(
-                    MOD_ID,
-                    0x01,
-                    0x03,
-                    b"corrupted state",
-                    b"no valid object copies".to_vec(),
-                )
-            }),
-            Err(_) => panic!(),
+            Ok(res) => res.ok_or_else(|| new_err_raw(err::CRP)),
+            Err(e) => Err(e.into()),
         }
     }
 
     #[inline(always)]
-    pub fn write(&self, f: impl FnOnce(&mut T)) -> FrozenRes<()> {
+    pub fn write(&self, f: impl FnOnce(&mut T)) -> RtaRes<()> {
         let _g = self.lock.lock().expect("Rta write lock poisoned");
 
         self.mmap.write(0, |di| {
@@ -125,7 +177,7 @@ where
         Ok(())
     }
 
-    fn init_if_new(mmap: &FrozenMMap<DiskInterface<T>>) -> FrozenRes<()> {
+    fn init_if_new(mmap: &FrozenMMap<DiskInterface<T>>) -> RtaRes<()> {
         match mmap.read(0, |di| {
             let byte_slice = [to_bytes(&di.obja.obj), to_bytes(&di.objb.obj)];
             let slice = crc32().crc_2x(byte_slice);
@@ -133,26 +185,10 @@ where
             di.state(slice[0], slice[1])
         })? {
             DIState::Valid => {}
+            DIState::Corrupted => return new_err(err::CRP),
+            DIState::HashMismatch => return new_err(err::HSH),
             DIState::Uninitialized => {
                 let _ = mmap.write_sync(0, |di| di.bootstrap())?;
-            }
-            DIState::HashMismatch => {
-                return Err(frozen_core::error::FrozenErr::new(
-                    MOD_ID,
-                    0x01,
-                    0x01,
-                    b"type hash mismatch",
-                    b"stored hash != T::HASH".to_vec(),
-                ));
-            }
-            DIState::Corrupted => {
-                return Err(frozen_core::error::FrozenErr::new(
-                    MOD_ID,
-                    0x01,
-                    0x02,
-                    b"corrupted disk state",
-                    b"no valid copies".to_vec(),
-                ));
             }
         }
 

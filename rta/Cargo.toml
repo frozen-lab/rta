@@ -22,7 +22,7 @@ name = "rta"
 path = "src/lib.rs"
 
 [dependencies.frozen-core]
-version = "0.0.12"
+version = "0.0.14"
 default-features = false
 features = [
     "crc32",
