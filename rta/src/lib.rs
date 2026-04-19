@@ -11,8 +11,11 @@ pub use rta_derive::RTA;
 /// Domain Id for [`Rta`] is **20**
 const ERRDOMAIN: u8 = 0x14;
 
+/// Total number of version of `T` stored on disk
+const VERSIONS_ON_DISK: usize = 4;
+
 /// module id used for [`FrozenErr`]
-static MODULE_ID: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+static MODULE_ID: sync::OnceLock<u8> = sync::OnceLock::new();
 
 #[inline(always)]
 fn mod_id() -> &'static u8 {
@@ -27,7 +30,7 @@ fn crc32() -> &'static Crc32C {
     CRC32.get().expect("CRC32 OnceLock not initialized")
 }
 
-/// Error codes for [`FrozenPipe`]
+/// Error codes for [`Rta`]
 mod err {
     use super::ErrCode;
 
@@ -35,18 +38,25 @@ mod err {
     pub const CRP: ErrCode = ErrCode::new(0x500, "All copies of `T` are corrupted");
 
     /// (1281) invalid hash for T
-    pub const HSH: ErrCode = ErrCode::new(0x500, "`T` has HASH mismatch as it may be updated after being stored");
+    pub const HSH: ErrCode = ErrCode::new(0x501, "`T` has HASH mismatch as it may be updated after being stored");
+
+    /// (1282) type `T` implements drop
+    pub const DRP: ErrCode = ErrCode::new(0x502, "T must not implement Drop");
+
+    /// (1283) type `T` is not 8 byte aligned
+    pub const ALN: ErrCode = ErrCode::new(0x503, "T must be 8-byte aligned");
+
+    /// (1284) type `T` is zero sized
+    pub const ZRO: ErrCode = ErrCode::new(0x504, "T must not be zero-sized");
+
+    /// (1285) `size_of::<T>()` is not multiple of 8
+    pub const SZE: ErrCode = ErrCode::new(0x505, "T size must be multiple of 8");
 }
 
 #[inline]
 fn new_err<R>(code: ErrCode) -> RtaRes<R> {
     let err = FrozenErr::new(*mod_id(), ERRDOMAIN, code, "");
     Err(err.into())
-}
-
-#[inline]
-fn new_err_raw(code: ErrCode) -> RtaErr {
-    FrozenErr::new(*mod_id(), ERRDOMAIN, code, "").into()
 }
 
 /// Derives the `rta::RTA` trait for a struct `T`
@@ -93,16 +103,15 @@ impl From<FrozenErr> for RtaErr {
 }
 
 /// Ṛta (ऋत) is a minimal metadata store for durable system state
-pub struct Rta<T: RTA + Send + Sync> {
-    lock: std::sync::Mutex<()>,
-    mmap: FrozenMMap<DiskInterface<T>>,
+pub struct Rta<T: RTA + Send + Sync + Clone> {
+    mmap: FrozenMMap<DiskObject<T>>,
+    cache: sync::Arc<(sync::Mutex<MemCache<T>>, sync::Condvar)>,
 }
 
 impl<T> Rta<T>
 where
-    T: Default + RTA + Send + Sized + Sync,
+    T: RTA + Default + Send + Sync + Clone + 'static,
 {
-    /// Create a new instance of [`Rta`]
     pub fn new<P: AsRef<std::path::Path>, const MID: u8>(path: P, flush_duration: time::Duration) -> RtaRes<Self> {
         // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees that the
         // first caller sets the value and all subsequent calls reuse it
@@ -114,168 +123,125 @@ where
         // to avoid repeated setup and reference passing
         let _ = CRC32.get_or_init(|| Crc32C::default());
 
-        let mmap = FrozenMMap::<DiskInterface<T>>::new(FMCfg {
+        // NOTE: we must validate `T` before mmap init, to avoid any UB errors
+        validate_t::<T>()?;
+
+        let mmap = FrozenMMap::<DiskObject<T>>::new(FMCfg {
             flush_duration,
             mid: MID,
-            initial_count: 1,
+            initial_count: VERSIONS_ON_DISK,
             path: path.as_ref().to_path_buf(),
         })?;
 
-        Self::init_if_new(&mmap)?;
+        let (obj, ver) = Self::init_or_create(&mmap)?;
+        let cache = sync::Arc::new((
+            sync::Mutex::new(MemCache { obj, ver, dir: false }),
+            sync::Condvar::new(),
+        ));
 
-        Ok(Self {
-            mmap,
-            lock: std::sync::Mutex::new(()),
-        })
+        Ok(Self { mmap, cache })
     }
 
-    #[inline(always)]
-    pub fn read<R>(&self, f: impl FnOnce(&T) -> R) -> RtaRes<R> {
-        let result = self.mmap.read(0, |di| {
-            let byte_slice = [to_bytes(&di.obja.obj), to_bytes(&di.objb.obj)];
-            let slice = crc32().crc_2x(byte_slice);
+    fn init_or_create(mmap: &FrozenMMap<DiskObject<T>>) -> RtaRes<(T, u32)> {
+        let mut best: Option<DiskObject<T>> = None;
+        for i in 0..VERSIONS_ON_DISK {
+            let res = mmap.read(i, |di| {
+                if di.hsh == 0 {
+                    return None;
+                }
 
-            let a_valid = di.obja.valid(slice[0]);
-            let b_valid = di.objb.valid(slice[1]);
+                if di.hsh != T::HASH {
+                    return Some(err::HSH);
+                }
 
-            let chosen = match (a_valid, b_valid) {
-                (true, true) => {
-                    if di.obja.ver >= di.objb.ver {
-                        &di.obja
-                    } else {
-                        &di.objb
+                let crc = crc32().crc(to_bytes(&di.obj));
+                if di.iseq_crc(crc) {
+                    if let Some(curr_best) = &best {
+                        if di.ver >= curr_best.ver {
+                            best = Some(di.clone());
+                        }
                     }
                 }
-                (true, false) => &di.obja,
-                (false, true) => &di.objb,
-                (false, false) => return None,
-            };
 
-            Some(f(&chosen.obj))
-        });
+                None
+            })?;
 
-        match result {
-            Ok(res) => res.ok_or_else(|| new_err_raw(err::CRP)),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    #[inline(always)]
-    pub fn write(&self, f: impl FnOnce(&mut T)) -> RtaRes<()> {
-        let _g = self.lock.lock().expect("Rta write lock poisoned");
-
-        self.mmap.write(0, |di| {
-            let max_ver = di.obja.ver.max(di.objb.ver);
-            let target = di.select_oldest_mut();
-
-            f(&mut target.obj);
-
-            target.ver = max_ver.wrapping_add(1);
-            target.crc = crc32().crc(to_bytes(&target.obj));
-        })?;
-
-        Ok(())
-    }
-
-    fn init_if_new(mmap: &FrozenMMap<DiskInterface<T>>) -> RtaRes<()> {
-        match mmap.read(0, |di| {
-            let byte_slice = [to_bytes(&di.obja.obj), to_bytes(&di.objb.obj)];
-            let slice = crc32().crc_2x(byte_slice);
-
-            di.state(slice[0], slice[1])
-        })? {
-            DIState::Valid => {}
-            DIState::Corrupted => return new_err(err::CRP),
-            DIState::HashMismatch => return new_err(err::HSH),
-            DIState::Uninitialized => {
-                let _ = mmap.write_sync(0, |di| di.bootstrap())?;
+            if let Some(err_code) = res {
+                return new_err(err_code);
             }
         }
 
-        Ok(())
+        if let Some(b) = best {
+            return Ok((b.obj, b.ver));
+        }
+
+        // NOTE: if no valid versions are found (in case of new creation), we init the first slot (0th idx)
+
+        let def = T::default();
+        let crc = crc32().crc(to_bytes(&def));
+
+        mmap.write_sync(0, |di| {
+            di.ver = 1;
+            di.crc = crc;
+            di.hsh = T::HASH;
+            di.obj = def.clone();
+        })?;
+
+        Ok((def, 1))
     }
 }
 
-enum DIState {
-    Uninitialized,
-    Valid,
-    HashMismatch,
-    Corrupted,
-}
-
-#[repr(C)]
-struct DiskInterface<T: RTA> {
-    hash: u64,
-    obja: DiskObject<T>,
-    objb: DiskObject<T>,
-}
-
-impl<T> DiskInterface<T>
-where
-    T: RTA,
-{
-    #[inline(always)]
-    fn state(&self, crc_a: u32, crc_b: u32) -> DIState {
-        if self.hash == 0 {
-            return DIState::Uninitialized;
-        }
-
-        if self.hash != T::HASH {
-            return DIState::HashMismatch;
-        }
-
-        if self.obja.valid(crc_a) || self.objb.valid(crc_b) {
-            return DIState::Valid;
-        }
-
-        DIState::Corrupted
-    }
-
-    fn bootstrap(&mut self) {
-        let default = T::default();
-        let crc = crc32().crc(to_bytes(&default));
-
-        self.hash = T::HASH;
-
-        // primary copy (valid)
-        self.obja.obj = default;
-        self.obja.ver = 1;
-        self.obja.crc = crc;
-
-        // secondary copy (invalid)
-        self.objb.ver = 0;
-        self.objb.crc = 0;
-    }
-
-    #[inline(always)]
-    fn select_oldest_mut(&mut self) -> &mut DiskObject<T> {
-        if self.obja.ver <= self.objb.ver {
-            &mut self.obja
-        } else {
-            &mut self.objb
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Clone)]
-struct DiskObject<T: RTA> {
+struct MemCache<T: RTA> {
     obj: T,
     ver: u32,
-    crc: u32,
+    dir: bool,
 }
 
-impl<T> DiskObject<T>
-where
-    T: RTA,
-{
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DiskObject<T: RTA> {
+    ver: u32,
+    crc: u32,
+    hsh: u64,
+    obj: T,
+}
+
+impl<T: RTA> DiskObject<T> {
     #[inline]
-    fn valid(&self, crc: u32) -> bool {
+    fn iseq_crc(&self, crc: u32) -> bool {
         self.crc == crc
+    }
+
+    #[inline]
+    fn iseq_hsh(&self, hsh: u64) -> bool {
+        self.hsh == hsh
     }
 }
 
 #[inline]
-const fn to_bytes<T: RTA>(t: &T) -> &[u8] {
+fn to_bytes<T: RTA>(t: &T) -> &[u8] {
     unsafe { slice::from_raw_parts(t as *const T as *const u8, T::SIZE) }
+}
+
+#[inline(always)]
+fn validate_t<T: RTA>() -> RtaRes<()> {
+    if std::mem::needs_drop::<T>() {
+        return new_err(err::DRP);
+    }
+
+    let align = std::mem::align_of::<T>();
+    if align != 8 {
+        return new_err(err::ALN);
+    }
+
+    let size = std::mem::size_of::<T>();
+    if size == 0 {
+        return new_err(err::ZRO);
+    }
+
+    if size % 8 != 0 {
+        return new_err(err::SZE);
+    }
+
+    Ok(())
 }
