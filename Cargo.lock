@@ -50,9 +50,9 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "frozen-core"
-version = "0.0.14"
+version = "0.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8718aaa9d9b8fae85e648aa4e878ba2a3c34f984c36b33412777f64a9036540b"
+checksum = "529ccda401b06800160b0ce9550186c63e288ecda4895e419e6979361f57240e"
 dependencies = [
  "libc",
 ]

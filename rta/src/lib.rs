@@ -1,33 +1,34 @@
+#![allow(unused)]
+
 use frozen_core::{
     crc32::Crc32C,
     error::{ErrCode, FrozenErr},
     fmmap::{FMCfg, FrozenMMap},
+    hints,
 };
-use std::{slice, sync, time};
+use std::{
+    slice,
+    sync::{self, atomic},
+    thread, time,
+};
 
 /// Procedural macro implementation for `#[derive(RTA)]`
 pub use rta_derive::RTA;
 
-/// Domain Id for [`Rta`] is **20**
-const ERRDOMAIN: u8 = 0x14;
-
-/// Total number of version of `T` stored on disk
+const ERRDOMAIN: u8 = 0x14; // Domain Id for [`Rta`] is **20**
 const VERSIONS_ON_DISK: usize = 4;
 
-/// module id used for [`FrozenErr`]
 static MODULE_ID: sync::OnceLock<u8> = sync::OnceLock::new();
-
-#[inline(always)]
-fn mod_id() -> &'static u8 {
-    MODULE_ID.get_or_init(|| 0)
-}
-
-/// crc backend used for calculating checksum
 static CRC32: sync::OnceLock<Crc32C> = sync::OnceLock::new();
 
 #[inline(always)]
+fn mod_id() -> &'static u8 {
+    MODULE_ID.get().expect("MID OnceLock is not initialized")
+}
+
+#[inline(always)]
 fn crc32() -> &'static Crc32C {
-    CRC32.get().expect("CRC32 OnceLock not initialized")
+    CRC32.get().expect("CRC32 OnceLock is not initialized")
 }
 
 /// Error codes for [`Rta`]
@@ -51,12 +52,24 @@ mod err {
 
     /// (1285) `size_of::<T>()` is not multiple of 8
     pub const SZE: ErrCode = ErrCode::new(0x505, "T size must be multiple of 8");
+
+    /// (1286) flush_tx error (panic inside)
+    pub const TXE: ErrCode = ErrCode::new(0x506, "flush_tx paniced inside");
+
+    /// (1287) lock poisoned
+    pub const LPN: ErrCode = ErrCode::new(0x507, "lock poisoned internally");
 }
 
 #[inline]
 fn new_err<R>(code: ErrCode) -> RtaRes<R> {
     let err = FrozenErr::new(*mod_id(), ERRDOMAIN, code, "");
     Err(err.into())
+}
+
+#[inline]
+fn new_err_raw<E: std::fmt::Display>(code: ErrCode, error: E) -> RtaErr {
+    let err = FrozenErr::new_raw(*mod_id(), ERRDOMAIN, code, error);
+    err.into()
 }
 
 /// Derives the `rta::RTA` trait for a struct `T`
@@ -103,19 +116,19 @@ impl From<FrozenErr> for RtaErr {
 }
 
 /// Ṛta (ऋत) is a minimal metadata store for durable system state
-pub struct Rta<T: RTA + Send + Sync + Clone> {
-    mmap: FrozenMMap<DiskObject<T>>,
-    cache: sync::Arc<(sync::Mutex<MemCache<T>>, sync::Condvar)>,
+pub struct Rta<T: RTA + Send + Sync + Clone, const MOD_ID: u8> {
+    core: sync::Arc<Core<T, MOD_ID>>,
+    handle: Option<thread::JoinHandle<()>>,
 }
 
-impl<T> Rta<T>
+impl<T, const MOD_ID: u8> Rta<T, MOD_ID>
 where
     T: RTA + Default + Send + Sync + Clone + 'static,
 {
-    pub fn new<P: AsRef<std::path::Path>, const MID: u8>(path: P, flush_duration: time::Duration) -> RtaRes<Self> {
+    pub fn new<P: AsRef<std::path::Path>>(path: P, flush_duration: time::Duration) -> RtaRes<Self> {
         // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees that the
         // first caller sets the value and all subsequent calls reuse it
-        let _ = MODULE_ID.get_or_init(|| MID);
+        let _ = MODULE_ID.get_or_init(|| MOD_ID);
 
         // INFO: Crc32C selects the optimal backend (hardware or software) at runtime w/ respect to hardware
         //
@@ -126,45 +139,53 @@ where
         // NOTE: we must validate `T` before mmap init, to avoid any UB errors
         validate_t::<T>()?;
 
-        let mmap = FrozenMMap::<DiskObject<T>>::new(FMCfg {
-            flush_duration,
-            mid: MID,
-            initial_count: VERSIONS_ON_DISK,
-            path: path.as_ref().to_path_buf(),
-        })?;
+        let mmap = FrozenMMap::<DiskObject<T>, MOD_ID>::new(
+            path,
+            FMCfg {
+                flush_duration,
+                initial_count: VERSIONS_ON_DISK,
+            },
+        )?;
 
         let (obj, ver) = Self::init_or_create(&mmap)?;
-        let cache = sync::Arc::new((
-            sync::Mutex::new(MemCache { obj, ver, dir: false }),
-            sync::Condvar::new(),
-        ));
+        let cache = sync::Mutex::new(MemCache { obj, ver, dirty: false });
 
-        Ok(Self { mmap, cache })
+        let core = sync::Arc::new(Core {
+            cv: sync::Condvar::new(),
+            cache,
+            mmap,
+            error: atomic::AtomicPtr::new(std::ptr::null_mut()),
+        });
+        let handle = Some(Core::spawn_flush_tx(core.clone()));
+        Ok(Self { handle, core })
     }
 
-    fn init_or_create(mmap: &FrozenMMap<DiskObject<T>>) -> RtaRes<(T, u32)> {
+    fn init_or_create(mmap: &FrozenMMap<DiskObject<T>, MOD_ID>) -> RtaRes<(T, u32)> {
         let mut best: Option<DiskObject<T>> = None;
         for i in 0..VERSIONS_ON_DISK {
-            let res = mmap.read(i, |di| {
-                if di.hsh == 0 {
-                    return None;
-                }
+            let res = unsafe {
+                mmap.read(i, |disk_object| {
+                    let di = &*disk_object;
+                    if di.hsh == 0 {
+                        return None;
+                    }
 
-                if di.hsh != T::HASH {
-                    return Some(err::HSH);
-                }
+                    if di.hsh != T::HASH {
+                        return Some(err::HSH);
+                    }
 
-                let crc = crc32().crc(to_bytes(&di.obj));
-                if di.iseq_crc(crc) {
-                    if let Some(curr_best) = &best {
-                        if di.ver >= curr_best.ver {
-                            best = Some(di.clone());
+                    let crc = crc32().crc(to_bytes(&di.obj));
+                    if di.iseq_crc(crc) {
+                        if let Some(curr_best) = &best {
+                            if di.ver >= curr_best.ver {
+                                best = Some(di.clone());
+                            }
                         }
                     }
-                }
 
-                None
-            })?;
+                    None
+                })
+            }?;
 
             if let Some(err_code) = res {
                 return new_err(err_code);
@@ -180,21 +201,124 @@ where
         let def = T::default();
         let crc = crc32().crc(to_bytes(&def));
 
-        mmap.write_sync(0, |di| {
-            di.ver = 1;
-            di.crc = crc;
-            di.hsh = T::HASH;
-            di.obj = def.clone();
-        })?;
+        let mut tx = mmap.new_tx();
+        for i in 0..VERSIONS_ON_DISK {
+            unsafe {
+                tx.write(i, |disk_object| {
+                    let di = &mut (*disk_object);
+
+                    di.ver = 0;
+                    di.crc = crc;
+                    di.hsh = T::HASH;
+                    di.obj = T::default();
+                })
+            }?;
+        }
+
+        // NOTE: the writes are submitted but not yet durable, we can assume here that the writes will be durable
+        // after the flush_duration, and if not, we have safeguards in place to counter the issue ;)
+        let _ = tx.commit()?;
 
         Ok((def, 1))
+    }
+}
+
+struct Core<T: RTA + Send + Sync + Clone, const MOD_ID: u8> {
+    cv: sync::Condvar,
+    cache: sync::Mutex<MemCache<T>>,
+    mmap: FrozenMMap<DiskObject<T>, MOD_ID>,
+    error: atomic::AtomicPtr<sync::Arc<RtaErr>>,
+}
+
+impl<T, const MOD_ID: u8> Core<T, MOD_ID>
+where
+    T: RTA + Default + Send + Sync + Clone + 'static,
+{
+    fn spawn_flush_tx(core: sync::Arc<Core<T, MOD_ID>>) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let mut idx = 0;
+            loop {
+                let mut guard = match core.cache.lock() {
+                    Ok(g) => g,
+                    Err(e) => {
+                        core.set_sync_error(new_err_raw(err::LPN, e));
+                        return;
+                    }
+                };
+
+                while !guard.dirty {
+                    guard = match core.cv.wait(guard) {
+                        Ok(g) => g,
+                        Err(e) => {
+                            core.set_sync_error(new_err_raw(err::LPN, e));
+                            return;
+                        }
+                    }
+                }
+
+                // NOTE: we snapshot current state, so we could resume read/write ops w/o any worries
+
+                let obj = guard.obj.clone();
+                let ver = guard.ver;
+                guard.dirty = false;
+                drop(guard);
+
+                let crc = crc32().crc(to_bytes(&obj));
+                if let Err(e) = unsafe {
+                    core.mmap.write_sync(idx % VERSIONS_ON_DISK, |disk_object| {
+                        let di = &mut (*disk_object);
+
+                        di.obj = obj;
+                        di.ver = ver;
+                        di.crc = crc;
+                        di.hsh = T::HASH;
+                    })
+                } {
+                    core.set_sync_error(e.into());
+                }
+
+                idx = idx.wrapping_add(1);
+            }
+        })
+    }
+
+    #[inline(always)]
+    fn set_sync_error(&self, err: RtaErr) {
+        let boxed = Box::into_raw(Box::new(sync::Arc::new(err)));
+        let old = self.error.swap(boxed, atomic::Ordering::AcqRel);
+
+        // NOTE: we must free the old error, if any, to avoid mem leaks
+        if !old.is_null() {
+            unsafe { drop(Box::from_raw(old)) };
+        }
+    }
+
+    #[inline(always)]
+    fn get_sync_error(&self) -> Option<RtaErr> {
+        let ptr = self.error.load(atomic::Ordering::Acquire);
+        if hints::likely(ptr.is_null()) {
+            return None;
+        }
+
+        let arc = unsafe { &*ptr }.clone();
+        Some((*arc).clone())
+    }
+
+    #[inline]
+    fn clear_sync_error(&self) {
+        let old = self.error.swap(std::ptr::null_mut(), atomic::Ordering::AcqRel);
+        if hints::unlikely(!old.is_null()) {
+            unsafe {
+                drop(Box::from_raw(old));
+            }
+        }
     }
 }
 
 struct MemCache<T: RTA> {
     obj: T,
     ver: u32,
-    dir: bool,
+    dirty: bool,
 }
 
 #[repr(C)]
