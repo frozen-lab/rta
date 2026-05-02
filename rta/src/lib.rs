@@ -160,6 +160,28 @@ where
         Ok(Self { handle, core })
     }
 
+    #[inline(always)]
+    pub fn write(&self, f: impl FnOnce(&mut T)) -> RtaRes<()> {
+        if let Some(err) = self.core.get_sync_error() {
+            return Err(err);
+        }
+
+        let mut guard = match self.core.cache.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                return Err(new_err_raw(err::LPN, e));
+            }
+        };
+
+        f(&mut guard.obj);
+        if !guard.dirty {
+            guard.dirty = true;
+            self.core.cv.notify_one();
+        }
+
+        Ok(())
+    }
+
     fn init_or_create(mmap: &FrozenMMap<DiskObject<T>, MOD_ID>) -> RtaRes<(T, u32)> {
         let mut best: Option<DiskObject<T>> = None;
         for i in 0..VERSIONS_ON_DISK {
