@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 use frozen_core::{
     crc32::Crc32C,
     error::{ErrCode, FrozenErr},
@@ -53,11 +51,8 @@ mod err {
     /// (1285) `size_of::<T>()` is not multiple of 8
     pub const SZE: ErrCode = ErrCode::new(0x505, "T size must be multiple of 8");
 
-    /// (1286) flush_tx error (panic inside)
-    pub const TXE: ErrCode = ErrCode::new(0x506, "flush_tx paniced inside");
-
-    /// (1287) lock poisoned
-    pub const LPN: ErrCode = ErrCode::new(0x507, "lock poisoned internally");
+    /// (1286) lock poisoned
+    pub const LPN: ErrCode = ErrCode::new(0x506, "lock poisoned internally");
 }
 
 #[inline]
@@ -180,6 +175,22 @@ where
         }
 
         Ok(())
+    }
+
+    #[inline(always)]
+    pub fn read(&self) -> RtaRes<T> {
+        if let Some(err) = self.core.get_sync_error() {
+            return Err(err);
+        }
+
+        let guard = match self.core.cache.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                return Err(new_err_raw(err::LPN, e));
+            }
+        };
+
+        Ok(guard.obj.clone())
     }
 
     fn init_or_create(mmap: &FrozenMMap<DiskObject<T>, MOD_ID>) -> RtaRes<(T, u32)> {
