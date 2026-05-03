@@ -13,8 +13,11 @@ use std::{
 /// Procedural macro implementation for `#[derive(RTA)]`
 pub use rta_derive::RTA;
 
-const ERRDOMAIN: u8 = 0x14; // Domain Id for [`Rta`] is **20**
-const VERSIONS_ON_DISK: usize = 4;
+/// Domain Id for [`Rta`] is **20**
+const ERRDOMAIN: u8 = 0x14;
+
+/// Number of copies of `T` stored on disk
+const COPIES_ON_DISK: usize = 4;
 
 static MODULE_ID: sync::OnceLock<u8> = sync::OnceLock::new();
 static CRC32: sync::OnceLock<Crc32C> = sync::OnceLock::new();
@@ -138,12 +141,12 @@ where
             path,
             FMCfg {
                 flush_duration,
-                initial_count: VERSIONS_ON_DISK,
+                initial_count: COPIES_ON_DISK,
             },
         )?;
 
-        let (obj, ver) = Self::init_or_create(&mmap)?;
-        let cache = sync::Mutex::new(MemCache { obj, ver, dirty: false });
+        let (obj, version) = Self::init_or_create(&mmap)?;
+        let cache = MemCache::new(obj, version);
 
         let core = Core::new(cache, mmap);
         let handle = Some(Core::spawn_flush_tx(core.clone()));
@@ -157,18 +160,25 @@ where
             return Err(err);
         }
 
-        let mut guard = match self.core.cache.lock() {
+        let mut write_lock = match self.core.cache.write() {
+            Ok(cache) => cache,
+            Err(e) => {
+                return Err(new_err_raw(err::LPN, e));
+            }
+        };
+
+        f(&mut write_lock.obj);
+        write_lock.version = write_lock.version.wrapping_add(1);
+
+        let mut guard = match self.core.guard.lock() {
             Ok(g) => g,
             Err(e) => {
                 return Err(new_err_raw(err::LPN, e));
             }
         };
 
-        f(&mut guard.obj);
-        guard.ver = guard.ver.wrapping_add(1);
-
-        if !guard.dirty {
-            guard.dirty = true;
+        if !(*guard) {
+            (*guard) = true;
             self.core.cv.notify_one();
         }
 
@@ -181,7 +191,7 @@ where
             return Err(err);
         }
 
-        let guard = match self.core.cache.lock() {
+        let guard = match self.core.cache.read() {
             Ok(g) => g,
             Err(e) => {
                 return Err(new_err_raw(err::LPN, e));
@@ -195,7 +205,7 @@ where
         let mut seen_initialized = false;
         let mut best: Option<DiskObject<T>> = None;
 
-        for i in 0..VERSIONS_ON_DISK {
+        for i in 0..COPIES_ON_DISK {
             let mut local_seen = false;
             let res = unsafe {
                 mmap.read(i, |disk_object| {
@@ -241,7 +251,7 @@ where
         let crc = crc32().crc(to_bytes(&def));
         let mut tx = mmap.new_tx();
 
-        for i in 0..VERSIONS_ON_DISK {
+        for i in 0..COPIES_ON_DISK {
             let idx = i;
             let ver = if idx == 0 { 1 } else { 0 };
             let obj = def.clone();
@@ -278,8 +288,9 @@ where
 
 struct Core<T: RTA + Send + Sync + Clone, const MOD_ID: u8> {
     cv: sync::Condvar,
+    guard: sync::Mutex<bool>,
     shutdown: atomic::AtomicBool,
-    cache: sync::Mutex<MemCache<T>>,
+    cache: sync::RwLock<MemCache<T>>,
     mmap: FrozenMMap<DiskObject<T>, MOD_ID>,
     error: atomic::AtomicPtr<sync::Arc<RtaErr>>,
 }
@@ -288,11 +299,12 @@ impl<T, const MOD_ID: u8> Core<T, MOD_ID>
 where
     T: RTA + Default + Send + Sync + Clone + 'static,
 {
-    fn new(cache: sync::Mutex<MemCache<T>>, mmap: FrozenMMap<DiskObject<T>, MOD_ID>) -> sync::Arc<Self> {
+    fn new(cache: MemCache<T>, mmap: FrozenMMap<DiskObject<T>, MOD_ID>) -> sync::Arc<Self> {
         sync::Arc::new(Self {
             mmap,
-            cache,
             cv: sync::Condvar::new(),
+            guard: sync::Mutex::new(false),
+            cache: sync::RwLock::new(cache),
             shutdown: atomic::AtomicBool::new(false),
             error: atomic::AtomicPtr::new(std::ptr::null_mut()),
         })
@@ -302,7 +314,7 @@ where
         std::thread::spawn(move || {
             let mut idx = 0;
             loop {
-                let mut guard = match core.cache.lock() {
+                let mut guard = match core.guard.lock() {
                     Ok(g) => g,
                     Err(e) => {
                         core.set_sync_error(new_err_raw(err::LPN, e));
@@ -310,7 +322,15 @@ where
                     }
                 };
 
-                while !guard.dirty && !core.shutdown.load(atomic::Ordering::Acquire) {
+                let write_lock = match core.cache.write() {
+                    Ok(cache) => cache,
+                    Err(e) => {
+                        core.set_sync_error(new_err_raw(err::LPN, e));
+                        return;
+                    }
+                };
+
+                while !(*guard) && !core.shutdown.load(atomic::Ordering::Acquire) {
                     guard = match core.cv.wait(guard) {
                         Ok(g) => g,
                         Err(e) => {
@@ -322,18 +342,22 @@ where
 
                 // NOTE: upon receiving the shutdown signal, we must exit the flush tx
 
-                if core.shutdown.load(atomic::Ordering::Acquire) && !guard.dirty {
+                if core.shutdown.load(atomic::Ordering::Acquire) && !(*guard) {
                     return;
                 }
 
                 // NOTE: we snapshot current state, so we could resume read/write ops w/o any worries
 
-                let ver = guard.ver;
-                let obj = guard.obj.clone();
+                let ver = write_lock.version;
+                let obj = write_lock.obj.clone();
                 let crc = crc32().crc(to_bytes(&obj));
 
+                // NOTE: by dropping the write guard early, we could allow read ops to go through, but write
+                // ops will have to wait to acquire the guard (to mark dirty)
+                drop(write_lock);
+
                 match unsafe {
-                    core.mmap.write_sync(idx % VERSIONS_ON_DISK, |disk_object| {
+                    core.mmap.write_sync(idx % COPIES_ON_DISK, |disk_object| {
                         let di = &mut (*disk_object);
 
                         di.obj = obj;
@@ -343,7 +367,7 @@ where
                     })
                 } {
                     Ok(()) => {
-                        guard.dirty = false;
+                        (*guard) = false;
                         core.clear_sync_error();
                     }
                     Err(e) => {
@@ -391,8 +415,14 @@ where
 
 struct MemCache<T: RTA> {
     obj: T,
-    ver: u32,
-    dirty: bool,
+    version: u32,
+}
+
+impl<T: RTA> MemCache<T> {
+    #[inline]
+    fn new(obj: T, version: u32) -> Self {
+        Self { obj, version }
+    }
 }
 
 #[repr(C)]
