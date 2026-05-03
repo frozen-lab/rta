@@ -169,6 +169,8 @@ where
         };
 
         f(&mut guard.obj);
+        guard.ver = guard.ver.wrapping_add(1);
+
         if !guard.dirty {
             guard.dirty = true;
             self.core.cv.notify_one();
@@ -194,8 +196,11 @@ where
     }
 
     fn init_or_create(mmap: &FrozenMMap<DiskObject<T>, MOD_ID>) -> RtaRes<(T, u32)> {
+        let mut seen_initialized = false;
         let mut best: Option<DiskObject<T>> = None;
+
         for i in 0..VERSIONS_ON_DISK {
+            let mut local_seen = false;
             let res = unsafe {
                 mmap.read(i, |disk_object| {
                     let di = &*disk_object;
@@ -203,16 +208,17 @@ where
                         return None;
                     }
 
-                    if di.hsh != T::HASH {
+                    if !di.iseq_hsh(T::HASH) {
                         return Some(err::HSH);
                     }
 
+                    local_seen = true;
                     let crc = crc32().crc(to_bytes(&di.obj));
+
                     if di.iseq_crc(crc) {
-                        if let Some(curr_best) = &best {
-                            if di.ver >= curr_best.ver {
-                                best = Some(di.clone());
-                            }
+                        match &best {
+                            Some(curr) if curr.ver >= di.ver => {}
+                            _ => best = Some(di.clone()),
                         }
                     }
 
@@ -223,35 +229,39 @@ where
             if let Some(err_code) = res {
                 return new_err(err_code);
             }
+
+            seen_initialized |= local_seen;
         }
 
         if let Some(b) = best {
             return Ok((b.obj, b.ver));
         }
 
-        // NOTE: if no valid versions are found (in case of new creation), we init the first slot (0th idx)
+        if seen_initialized {
+            return new_err(err::CRP);
+        }
 
         let def = T::default();
         let crc = crc32().crc(to_bytes(&def));
-
         let mut tx = mmap.new_tx();
-        for i in 0..VERSIONS_ON_DISK {
-            unsafe {
-                tx.write(i, |disk_object| {
-                    let di = &mut (*disk_object);
 
-                    di.ver = 0;
+        for i in 0..VERSIONS_ON_DISK {
+            let idx = i;
+            let ver = if idx == 0 { 1 } else { 0 };
+            let obj = def.clone();
+
+            unsafe {
+                tx.write(idx, move |disk_object| {
+                    let di = &mut (*disk_object);
+                    di.ver = ver;
                     di.crc = crc;
                     di.hsh = T::HASH;
-                    di.obj = T::default();
+                    di.obj = obj;
                 })
             }?;
         }
 
-        // NOTE: the writes are submitted but not yet durable, we can assume here that the writes will be durable
-        // after the flush_duration, and if not, we have safeguards in place to counter the issue ;)
         let _ = tx.commit()?;
-
         Ok((def, 1))
     }
 }
@@ -291,13 +301,11 @@ where
 
                 // NOTE: we snapshot current state, so we could resume read/write ops w/o any worries
 
-                let obj = guard.obj.clone();
                 let ver = guard.ver;
-                guard.dirty = false;
-                drop(guard);
-
+                let obj = guard.obj.clone();
                 let crc = crc32().crc(to_bytes(&obj));
-                if let Err(e) = unsafe {
+
+                match unsafe {
                     core.mmap.write_sync(idx % VERSIONS_ON_DISK, |disk_object| {
                         let di = &mut (*disk_object);
 
@@ -307,7 +315,13 @@ where
                         di.hsh = T::HASH;
                     })
                 } {
-                    core.set_sync_error(e.into());
+                    Ok(()) => {
+                        guard.dirty = false;
+                        core.clear_sync_error();
+                    }
+                    Err(e) => {
+                        core.set_sync_error(e.into());
+                    }
                 }
 
                 idx = idx.wrapping_add(1);
