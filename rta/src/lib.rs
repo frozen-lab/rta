@@ -145,13 +145,9 @@ where
         let (obj, ver) = Self::init_or_create(&mmap)?;
         let cache = sync::Mutex::new(MemCache { obj, ver, dirty: false });
 
-        let core = sync::Arc::new(Core {
-            cv: sync::Condvar::new(),
-            cache,
-            mmap,
-            error: atomic::AtomicPtr::new(std::ptr::null_mut()),
-        });
+        let core = Core::new(cache, mmap);
         let handle = Some(Core::spawn_flush_tx(core.clone()));
+
         Ok(Self { handle, core })
     }
 
@@ -266,8 +262,23 @@ where
     }
 }
 
+impl<T, const MOD_ID: u8> Drop for Rta<T, MOD_ID>
+where
+    T: RTA + Default + Send + Sync + Clone,
+{
+    fn drop(&mut self) {
+        self.core.shutdown.store(true, atomic::Ordering::Release);
+        self.core.cv.notify_all();
+
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 struct Core<T: RTA + Send + Sync + Clone, const MOD_ID: u8> {
     cv: sync::Condvar,
+    shutdown: atomic::AtomicBool,
     cache: sync::Mutex<MemCache<T>>,
     mmap: FrozenMMap<DiskObject<T>, MOD_ID>,
     error: atomic::AtomicPtr<sync::Arc<RtaErr>>,
@@ -277,6 +288,16 @@ impl<T, const MOD_ID: u8> Core<T, MOD_ID>
 where
     T: RTA + Default + Send + Sync + Clone + 'static,
 {
+    fn new(cache: sync::Mutex<MemCache<T>>, mmap: FrozenMMap<DiskObject<T>, MOD_ID>) -> sync::Arc<Self> {
+        sync::Arc::new(Self {
+            mmap,
+            cache,
+            cv: sync::Condvar::new(),
+            shutdown: atomic::AtomicBool::new(false),
+            error: atomic::AtomicPtr::new(std::ptr::null_mut()),
+        })
+    }
+
     fn spawn_flush_tx(core: sync::Arc<Core<T, MOD_ID>>) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
             let mut idx = 0;
@@ -289,7 +310,7 @@ where
                     }
                 };
 
-                while !guard.dirty {
+                while !guard.dirty && !core.shutdown.load(atomic::Ordering::Acquire) {
                     guard = match core.cv.wait(guard) {
                         Ok(g) => g,
                         Err(e) => {
@@ -297,6 +318,12 @@ where
                             return;
                         }
                     }
+                }
+
+                // NOTE: upon receiving the shutdown signal, we must exit the flush tx
+
+                if core.shutdown.load(atomic::Ordering::Acquire) && !guard.dirty {
+                    return;
                 }
 
                 // NOTE: we snapshot current state, so we could resume read/write ops w/o any worries
