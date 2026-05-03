@@ -19,6 +19,21 @@ const ERRDOMAIN: u8 = 0x14;
 /// Number of copies of `T` stored on disk
 const COPIES_ON_DISK: usize = 4;
 
+/// flush duration for mmap
+///
+/// ## NOTE
+///
+/// This is just a placeholder value, as `Rta` does and must not rely on [`FrozenMMap`] for the flush. [`Rta`],
+/// by itself performs instant durable writes via background thread, eliminating the need to rely on [`FrozenMMap`]
+/// to provide durability.
+const MMAP_FLUSH_DURATION: time::Duration = time::Duration::from_secs(1);
+
+/// mmap config used by [`FrozenMMap`]
+const MMAP_CONFIG: FMCfg = FMCfg {
+    initial_count: COPIES_ON_DISK,
+    flush_duration: MMAP_FLUSH_DURATION,
+};
+
 static MODULE_ID: sync::OnceLock<u8> = sync::OnceLock::new();
 static CRC32: sync::OnceLock<Crc32C> = sync::OnceLock::new();
 
@@ -123,27 +138,19 @@ impl<T, const MOD_ID: u8> Rta<T, MOD_ID>
 where
     T: RTA + Default + Send + Sync + Clone + 'static,
 {
-    pub fn new<P: AsRef<std::path::Path>>(path: P, flush_duration: time::Duration) -> RtaRes<Self> {
-        // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees that the
-        // first caller sets the value and all subsequent calls reuse it
+    pub fn new<P: AsRef<std::path::Path>>(path: P) -> RtaRes<Self> {
+        // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees
+        // that the first caller sets the value and all subsequent calls reuse it
         let _ = MODULE_ID.get_or_init(|| MOD_ID);
 
-        // INFO: Crc32C selects the optimal backend (hardware or software) at runtime w/ respect to hardware
-        //
-        // NOTE: Since, the value is used across objects, we initialize it once and pin it in a global `OnceLock`
+        // NOTE: The value is used across objects, we initialize it once and pin it in a global `OnceLock`
         // to avoid repeated setup and reference passing
         let _ = CRC32.get_or_init(|| Crc32C::default());
 
         // NOTE: we must validate `T` before mmap init, to avoid any UB errors
         validate_t::<T>()?;
 
-        let mmap = FrozenMMap::<DiskObject<T>, MOD_ID>::new(
-            path,
-            FMCfg {
-                flush_duration,
-                initial_count: COPIES_ON_DISK,
-            },
-        )?;
+        let mmap = FrozenMMap::<DiskObject<T>, MOD_ID>::new(path, MMAP_CONFIG)?;
 
         let (obj, version) = Self::init_or_create(&mmap)?;
         let cache = MemCache::new(obj, version);
