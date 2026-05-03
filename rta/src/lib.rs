@@ -167,6 +167,13 @@ where
             return Err(err);
         }
 
+        let mut guard = match self.core.guard.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                return Err(new_err_raw(err::LPN, e));
+            }
+        };
+
         let mut write_lock = match self.core.cache.write() {
             Ok(cache) => cache,
             Err(e) => {
@@ -176,13 +183,6 @@ where
 
         f(&mut write_lock.obj);
         write_lock.version = write_lock.version.wrapping_add(1);
-
-        let mut guard = match self.core.guard.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                return Err(new_err_raw(err::LPN, e));
-            }
-        };
 
         if !(*guard) {
             (*guard) = true;
@@ -329,14 +329,6 @@ where
                     }
                 };
 
-                let write_lock = match core.cache.write() {
-                    Ok(cache) => cache,
-                    Err(e) => {
-                        core.set_sync_error(new_err_raw(err::LPN, e));
-                        return;
-                    }
-                };
-
                 while !(*guard) && !core.shutdown.load(atomic::Ordering::Acquire) {
                     guard = match core.cv.wait(guard) {
                         Ok(g) => g,
@@ -346,6 +338,14 @@ where
                         }
                     }
                 }
+
+                let write_lock = match core.cache.write() {
+                    Ok(cache) => cache,
+                    Err(e) => {
+                        core.set_sync_error(new_err_raw(err::LPN, e));
+                        return;
+                    }
+                };
 
                 // NOTE: upon receiving the shutdown signal, we must exit the flush tx
 
