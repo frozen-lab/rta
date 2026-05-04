@@ -391,3 +391,39 @@ fn ok_stress_mixed_write_read() {
         h.join().unwrap();
     }
 }
+
+#[test]
+fn err_unaligned_type_t() {
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct BadAlign {
+        a: u32,
+    }
+
+    // NOTE: we mock this as the RTA macro prevents BadAlign w/ compiler error
+    unsafe impl RTA for BadAlign {
+        const HASH: u64 = 1;
+        const SIZE: usize = std::mem::size_of::<Self>();
+    }
+
+    let path = tmp_path();
+    let res = Rta::<BadAlign, MOD_ID>::new(&path);
+    assert!(res.is_err());
+}
+
+#[test]
+fn err_type_with_drop() {
+    #[repr(C)]
+    #[derive(Default, Clone, RTA)]
+    struct HasDrop {
+        a: u64,
+    }
+
+    impl Drop for HasDrop {
+        fn drop(&mut self) {}
+    }
+
+    let path = tmp_path();
+    let res = Rta::<HasDrop, MOD_ID>::new(&path);
+    assert!(res.is_err());
+}
