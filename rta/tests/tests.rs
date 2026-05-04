@@ -329,3 +329,65 @@ fn ok_fallback_to_previous_version_when_corrupted() {
     let v = rta.read().unwrap();
     assert!(v.a == 1);
 }
+
+#[test]
+fn ok_drop_under_load() {
+    let path = tmp_path();
+    let rta = std::sync::Arc::new(Rta::<TestType, MOD_ID>::new(&path).unwrap());
+
+    let mut handles = vec![];
+    for i in 0..4 {
+        let r = rta.clone();
+        handles.push(std::thread::spawn(move || {
+            r.write(|t| {
+                t.a = i;
+                t.b = i;
+            })
+            .unwrap();
+        }));
+    }
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    drop(rta);
+
+    let rta = Rta::<TestType, MOD_ID>::new(&path).unwrap();
+    let v = rta.read().unwrap();
+    assert_eq!(v.a, v.b);
+}
+
+#[test]
+fn ok_stress_mixed_write_read() {
+    let path = tmp_path();
+    let rta = std::sync::Arc::new(Rta::<TestType, MOD_ID>::new(&path).unwrap());
+
+    let mut handles = vec![];
+    for _ in 0..4 {
+        let r = rta.clone();
+        handles.push(std::thread::spawn(move || {
+            for i in 0..0x100 {
+                r.write(|t| {
+                    t.a = i;
+                    t.b = i;
+                })
+                .unwrap();
+            }
+        }));
+    }
+
+    for _ in 0..4 {
+        let r = rta.clone();
+        handles.push(std::thread::spawn(move || {
+            for _ in 0..0x100 {
+                let v = r.read().unwrap();
+                assert_eq!(v.a, v.b);
+            }
+        }));
+    }
+
+    for h in handles {
+        h.join().unwrap();
+    }
+}
