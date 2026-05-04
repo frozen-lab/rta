@@ -209,48 +209,45 @@ where
     }
 
     fn init_or_create(mmap: &FrozenMMap<DiskObject<T>, MOD_ID>) -> RtaRes<(T, u32)> {
-        let mut seen_initialized = false;
+        let mut seen_any = false;
+        let mut seen_compatible = false;
         let mut best: Option<DiskObject<T>> = None;
 
         for i in 0..COPIES_ON_DISK {
-            let mut local_seen = false;
-            let res = unsafe {
+            unsafe {
                 mmap.read(i, |disk_object| {
                     let di = &*disk_object;
-                    if di.hsh == 0 {
-                        return None;
+
+                    if di.hsh != 0 {
+                        seen_any = true;
                     }
 
                     if !di.iseq_hsh(T::HASH) {
-                        return Some(err::HSH);
+                        return;
                     }
 
-                    local_seen = true;
-                    let crc = crc32().crc(to_bytes(&di.obj));
+                    seen_compatible = true;
 
+                    let crc = crc32().crc(to_bytes(&di.obj));
                     if di.iseq_crc(crc) {
                         match &best {
                             Some(curr) if curr.ver >= di.ver => {}
                             _ => best = Some(di.clone()),
                         }
                     }
-
-                    None
                 })
             }?;
-
-            if let Some(err_code) = res {
-                return new_err(err_code);
-            }
-
-            seen_initialized |= local_seen;
         }
 
         if let Some(b) = best {
             return Ok((b.obj, b.ver));
         }
 
-        if seen_initialized {
+        if seen_any && !seen_compatible {
+            return new_err(err::HSH);
+        }
+
+        if seen_any {
             return new_err(err::CRP);
         }
 
