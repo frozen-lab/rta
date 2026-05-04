@@ -19,7 +19,7 @@
 //!
 //! ## Example
 //!
-//! ```rs
+//! ```
 //! use rta::{Rta, RTA};
 //!
 //! #[repr(C)]
@@ -30,7 +30,9 @@
 //! }
 //!
 //! const MOD_ID: u8 = 0;
-//! let rta = Rta::<TestType, MOD_ID>::new().unwrap();
+//!
+//! let path = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
+//! let rta = Rta::<TestType, MOD_ID>::new(&path).unwrap();
 //!
 //! rta.write(|t| {
 //!   t.a = 0x20;
@@ -38,7 +40,7 @@
 //! }).unwrap();
 //!
 //! let val = rta.read().unwrap();
-//! assert_eq!(val.a, 0x30);
+//! assert_eq!(val.a, 0x20);
 //! assert_eq!(val.b, 0x40);
 //! ```
 //!

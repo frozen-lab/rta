@@ -32,7 +32,9 @@ struct TestType {
 }
 
 const MOD_ID: u8 = 0;
-let rta = Rta::<TestType, MOD_ID>::new().unwrap();
+
+let path = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
+let rta = Rta::<TestType, MOD_ID>::new(&path).unwrap();
 
 rta.write(|t| {
   t.a = 0x20;
@@ -40,7 +42,7 @@ rta.write(|t| {
 }).unwrap();
 
 let val = rta.read().unwrap();
-assert_eq!(val.a, 0x30);
+assert_eq!(val.a, 0x20);
 assert_eq!(val.b, 0x40);
 ```
 
@@ -65,5 +67,5 @@ at read time.
 
 ## Etymology
 
-> [!TIP]
-> Ṛta (ऋत) is a _Vedic_ concept of cosmic order, truth, and invariance, which inspires the design of Ṛta.
+ऋत (transliterated as Ṛta) is a _Vedic_ concept of cosmic order, truth, and invariance, which inspires the design
+of the Ṛta crate.
