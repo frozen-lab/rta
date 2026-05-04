@@ -67,5 +67,5 @@ at read time.
 
 ## Etymology
 
-ऋत (transliterated as Ṛta) is a _Vedic_ concept of cosmic order, truth, and invariance, which inspires the design
-of the Ṛta crate.
+ऋत (transliterated as Ṛta) is a _Vedic_ concept of cosmic order, truth, and invariance that inspired the design
+of Ṛta crate.

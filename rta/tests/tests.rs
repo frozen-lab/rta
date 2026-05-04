@@ -38,7 +38,6 @@ fn ok_init_existing() {
 
     {
         let rta = Rta::<TestType, MOD_ID>::new(&path).unwrap();
-
         rta.write(|t| {
             t.a = 0x30;
             t.b = 0x40;
@@ -60,10 +59,7 @@ fn ok_init_existing() {
 #[test]
 fn err_init_hash_mismatch() {
     let path = tmp_path();
-
-    {
-        let _ = Rta::<TestType, MOD_ID>::new(&path).unwrap();
-    }
+    let _ = Rta::<TestType, MOD_ID>::new(&path).unwrap();
 
     let res = Rta::<TestType2, MOD_ID>::new(&path);
     assert!(res.is_err());
@@ -104,7 +100,6 @@ fn ok_single_write() {
     .unwrap();
 
     let val = rta.read().unwrap();
-
     assert_eq!(val.a, 0x0A);
     assert_eq!(val.b, 0x14);
 }

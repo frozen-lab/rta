@@ -1,71 +1,6 @@
-//! Ṛta (ऋत) is a minimal metadata store for durable system state
-//!
-//! ## Requirements of `T`
-//!
-//! T must satisfy following layout and safety constraints:
-//!
-//! - Implements `RTA`
-//! - Uses `#[repr(C)]`
-//! - 8 bytes alignment
-//! - Does not implements `Drop`
-//! - Size must be >0 and multiple of 8
-//! - Implements `Default + Clone + Send + Sync + 'static`
-//!
-//! ## Limitations of `T`
-//!
-//! - No non-deterministic feilds
-//! - No interior pointers or self-references
-//! - Changes made in struct layout break compatibility
-//!
-//! ## Example
-//!
-//! ```
-//! use rta::{Rta, RTA};
-//!
-//! #[repr(C)]
-//! #[derive(Default, Clone, Copy, RTA)]
-//! struct TestType {
-//!     a: u64,
-//!     b: u64,
-//! }
-//!
-//! const MOD_ID: u8 = 0;
-//!
-//! let path = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
-//! let rta = Rta::<TestType, MOD_ID>::new(&path).unwrap();
-//!
-//! rta.write(|t| {
-//!   t.a = 0x20;
-//!   t.b = 0x40;
-//! }).unwrap();
-//!
-//! let val = rta.read().unwrap();
-//! assert_eq!(val.a, 0x20);
-//! assert_eq!(val.b, 0x40);
-//! ```
-//!
-//! ## Write Operations
-//!
-//! The [`Rta::write`] call is _fire-and-forget_. It mutates in-mem state and triggers durable flush via a background
-//! thread, providing close to none IO overhead for the caller.
-//!
-//! Multiple write call, when made rightly one-after-another, may coalesce into fewer disk writes.
-//!
-//! ## Read Operations
-//!
-//! The [`Rta::read`] returns the latest in-mem state. By default the read is optimistic and does not guarantee durability
-//! at read time.
-//!
-//! ## Concurrency Model
-//!
-//! | Operation        | Parallelism | Blocks Reads | Blocks Writes |
-//! |:-----------------|-------------|--------------|---------------|
-//! | **Read**         | Yes         | No           | No            |
-//! | **Write**        | Limited     | No           | Sometimes     |
-//!
-//! ## Etymology
-//!
-//! Ṛta (ऋत) is a *Vedic* concept of cosmic order, truth, and invariance, which inspires the design of `Rta`.
+#![deny(missing_docs)]
+#![allow(unsafe_op_in_unsafe_fn)]
+#![doc = include_str!("../../README.md")]
 
 use frozen_core::{
     crc32::Crc32C,
@@ -210,6 +145,29 @@ impl<T, const MOD_ID: u8> Rta<T, MOD_ID>
 where
     T: RTA + Default + Send + Sync + Clone + 'static,
 {
+    /// Create a new instance of [`Rta`]
+    ///
+    /// Given `path` must point to a file and not a directory
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use rta::{Rta, RTA};
+    ///
+    /// #[repr(C)]
+    /// #[derive(Default, Clone, Copy, RTA)]
+    /// struct TestType(u64);
+    ///
+    /// let path = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
+    /// let rta = Rta::<TestType, 0>::new(&path).unwrap();
+    ///
+    /// rta.write(|t| {
+    ///   t.0 = 0x0A;
+    /// }).unwrap();
+    ///
+    /// let val = rta.read().unwrap();
+    /// assert_eq!(val.0, 0x0A);
+    /// ```
     pub fn new<P: AsRef<std::path::Path>>(path: P) -> RtaRes<Self> {
         // NOTE: The value is used for error logging and is initialized only once, as `OnceLock` guarantees
         // that the first caller sets the value and all subsequent calls reuse it
@@ -233,6 +191,34 @@ where
         Ok(Self { handle, core })
     }
 
+    /// Push a write into metadata store
+    ///
+    /// This call is designed as _fire-and-forget_, while avoiding IO overhead
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use rta::{Rta, RTA};
+    ///
+    /// #[repr(C)]
+    /// #[derive(Default, Clone, Copy, RTA)]
+    /// struct TestType(u64, u64);
+    ///
+    /// let path = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
+    /// let rta = Rta::<TestType, 0>::new(&path).unwrap();
+    ///
+    /// rta.write(|t| {
+    ///   t.0 = 0x0A;
+    /// }).unwrap();
+    ///
+    /// rta.write(|t| {
+    ///   t.1 = 0x1A;
+    /// }).unwrap();
+    ///
+    /// let val = rta.read().unwrap();
+    /// assert_eq!(val.0, 0x0A);
+    /// assert_eq!(val.1, 0x1A);
+    /// ```
     #[inline(always)]
     pub fn write(&self, f: impl FnOnce(&mut T)) -> RtaRes<()> {
         if let Some(err) = self.core.get_sync_error() {
@@ -264,6 +250,29 @@ where
         Ok(())
     }
 
+    /// Read data from the metadata store
+    ///
+    /// The read is optimistic and does not provide durability gurantee at read time
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use rta::{Rta, RTA};
+    ///
+    /// #[repr(C)]
+    /// #[derive(Default, Clone, Copy, RTA)]
+    /// struct TestType(u64);
+    ///
+    /// let path = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
+    /// let rta = Rta::<TestType, 0>::new(&path).unwrap();
+    ///
+    /// rta.write(|t| {
+    ///   t.0 = 0x100;
+    /// }).unwrap();
+    ///
+    /// let val = rta.read().unwrap();
+    /// assert_eq!(val.0, 0x100);
+    /// ```
     #[inline(always)]
     pub fn read(&self) -> RtaRes<T> {
         if let Some(err) = self.core.get_sync_error() {
