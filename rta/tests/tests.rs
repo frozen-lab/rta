@@ -1,4 +1,5 @@
 use rta::{Rta, RTA};
+use std::io::{Seek, SeekFrom, Write};
 
 const MOD_ID: u8 = 0x00;
 
@@ -17,7 +18,7 @@ struct TestType2 {
 }
 
 fn tmp_path() -> std::path::PathBuf {
-    tempfile::tempdir().expect("tmpdir").keep().join("rta_test")
+    tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf()
 }
 
 #[test]
@@ -70,7 +71,6 @@ fn err_init_hash_mismatch() {
 
 #[test]
 fn err_init_all_corrupt() {
-    use std::io::{Seek, SeekFrom, Write};
     let path = tmp_path();
 
     {
@@ -218,4 +218,114 @@ fn ok_concurrent_reads_during_concurrent_writes() {
 
     writer.join().unwrap();
     reader.join().unwrap();
+}
+
+#[test]
+fn ok_drop_persists_last_dirty() {
+    let path = tmp_path();
+
+    {
+        let rta = Rta::<TestType, MOD_ID>::new(&path).unwrap();
+        rta.write(|t| {
+            t.a = 0xAA;
+            t.b = 0xBB;
+        })
+        .unwrap();
+    }
+
+    {
+        let rta = Rta::<TestType, MOD_ID>::new(&path).unwrap();
+        let v = rta.read().unwrap();
+
+        assert_eq!(v.a, 0xAA);
+        assert_eq!(v.b, 0xBB);
+    }
+}
+
+#[test]
+fn ok_init_existing_with_partial_corruption() {
+    use std::io::{Seek, SeekFrom, Write};
+    let path = tmp_path();
+
+    {
+        let rta = Rta::<TestType, MOD_ID>::new(&path).unwrap();
+
+        rta.write(|t| {
+            t.b = 0x22;
+        })
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        rta.write(|t| {
+            t.a = 0x11;
+        })
+        .unwrap();
+
+        drop(rta);
+    }
+
+    {
+        const SLOT_SIZE: usize = 0x10 + TestType::SIZE;
+        let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+
+        // corrupt slot 0
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f.write_all(&[0xFF; SLOT_SIZE]).unwrap();
+
+        // corrupt slot 2
+        f.seek(SeekFrom::Start((SLOT_SIZE * 2) as u64)).unwrap();
+        f.write_all(&[0xFF; SLOT_SIZE]).unwrap();
+
+        // corrupt slot 3
+        f.seek(SeekFrom::Start((SLOT_SIZE * 3) as u64)).unwrap();
+        f.write_all(&[0xFF; SLOT_SIZE]).unwrap();
+
+        f.flush().unwrap();
+    }
+
+    let rta = Rta::<TestType, MOD_ID>::new(&path).unwrap();
+    let v = rta.read().unwrap();
+
+    assert_eq!(v.a, 0x11);
+    assert_eq!(v.b, 0x22);
+}
+
+#[test]
+fn ok_fallback_to_previous_version_when_corrupted() {
+    use std::io::{Seek, SeekFrom, Write};
+    let path = tmp_path();
+
+    {
+        let rta = Rta::<TestType, MOD_ID>::new(&path).unwrap();
+
+        rta.write(|t| t.a = 1).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        rta.write(|t| t.a = 2).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        rta.write(|t| t.a = 3).unwrap();
+
+        drop(rta);
+    }
+
+    {
+        const SLOT_SIZE: usize = 0x10 + TestType::SIZE;
+        let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+
+        // corrupt slot 1
+        f.seek(SeekFrom::Start(SLOT_SIZE as u64)).unwrap();
+        f.write_all(&[0xFF; SLOT_SIZE]).unwrap();
+
+        // corrupt slot 2
+        f.seek(SeekFrom::Start((SLOT_SIZE * 2) as u64)).unwrap();
+        f.write_all(&[0xFF; SLOT_SIZE]).unwrap();
+
+        // corrupt slot 3
+        f.seek(SeekFrom::Start((SLOT_SIZE * 3) as u64)).unwrap();
+        f.write_all(&[0xFF; SLOT_SIZE]).unwrap();
+
+        f.flush().unwrap();
+    }
+
+    let rta = Rta::<TestType, MOD_ID>::new(&path).unwrap();
+    let v = rta.read().unwrap();
+    assert!(v.a == 1);
 }
