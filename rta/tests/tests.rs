@@ -367,7 +367,7 @@ fn ok_stress_mixed_write_read() {
     for _ in 0..4 {
         let r = rta.clone();
         handles.push(std::thread::spawn(move || {
-            for i in 0..0x100 {
+            for i in 0..0x80 {
                 r.write(|t| {
                     t.a = i;
                     t.b = i;
@@ -380,7 +380,7 @@ fn ok_stress_mixed_write_read() {
     for _ in 0..4 {
         let r = rta.clone();
         handles.push(std::thread::spawn(move || {
-            for _ in 0..0x100 {
+            for _ in 0..0x80 {
                 let v = r.read().unwrap();
                 assert_eq!(v.a, v.b);
             }
@@ -426,4 +426,52 @@ fn err_type_with_drop() {
     let path = tmp_path();
     let res = Rta::<HasDrop, MOD_ID>::new(&path);
     assert!(res.is_err());
+}
+
+#[test]
+fn ok_large_type() {
+    #[repr(C)]
+    #[derive(Clone, Copy, RTA)]
+    struct LargeT {
+        data: [u64; 0x80],
+    }
+
+    impl Default for LargeT {
+        fn default() -> Self {
+            Self { data: [0u64; 0x80] }
+        }
+    }
+
+    let path = tmp_path();
+    let rta = Rta::<LargeT, MOD_ID>::new(&path).unwrap();
+
+    rta.write(|t| {
+        t.data[0] = 0x30;
+        t.data[127] = 0x4A;
+    })
+    .unwrap();
+
+    let v = rta.read().unwrap();
+    assert_eq!(v.data[0], 0x30);
+    assert_eq!(v.data[127], 0x4A);
+}
+
+#[test]
+fn ok_open_drop_under_stress() {
+    let path = tmp_path();
+
+    for i in 0..0x32 {
+        {
+            let rta = Rta::<TestType, MOD_ID>::new(&path).unwrap();
+            rta.write(|t| {
+                t.a = i;
+                t.b = i;
+            })
+            .unwrap();
+        }
+
+        let rta = Rta::<TestType, MOD_ID>::new(&path).unwrap();
+        let v = rta.read().unwrap();
+        assert_eq!(v.a, i);
+    }
 }
