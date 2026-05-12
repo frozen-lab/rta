@@ -46,12 +46,40 @@ assert_eq!(val.a, 0x20);
 assert_eq!(val.b, 0x40);
 ```
 
-## Write Operations
+## Writes
 
-The [`Rta::write`] call is _fire-and-forget_. It mutates in-mem state and triggers durable flush via a background
-thread, providing close to none IO overhead for the caller.
+The [`Rta::write()`] operation in `Rta` is designed as a lightweight _fire-and-forget_ metadata update primitive.
+This call itself does **not** wait for disk synchronization on the fast path, allowing extremely low write latency
+while still preserving crash-safe durability semantics by handing off durability responsibility to a background
+thread.
 
-Multiple write call, when made rightly one-after-another, may coalesce into fewer disk writes.
+### Guarantees
+
+Following guarantees are provided,
+
+- serialized metadata updates
+- crash-safe durability via multiple on-disk copies
+- automatic recovery from torn writes using latest valid version
+
+### Benchmarks
+
+| Metric  | Latency |
+|:--------|:--------|
+| Average | 83 ns   |
+| P50     | 101 ns  |
+| P90     | 102 ns  |
+| P99     | 102 ns  |
+| P999    | 102 ns  |
+
+### Notes
+
+- Most writes complete in ~100ns on the uncontended fast path.
+- The benchmark primarily measures,
+  - lock acquisition
+  - in-memory mutation
+  - dirty state propagation
+- Disk durability is handled asynchronously by a dedicated background thread.
+- Tail latency may increase if writes overlap with active durability synchronization.
 
 ## Read Operations
 
