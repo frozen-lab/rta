@@ -4,17 +4,19 @@ use std::io::{Seek, SeekFrom, Write};
 const MOD_ID: u8 = 0x00;
 
 #[repr(C)]
+#[repr(align(8))]
 #[derive(Default, Clone, Copy, RTA)]
 struct TestType {
-    a: u64,
-    b: u64,
+    a: u32,
+    b: u32,
 }
 
 #[repr(C)]
+#[repr(align(8))]
 #[derive(Default, Clone, Copy, RTA)]
 struct TestType2 {
-    a: u64,
-    b: u64,
+    a: u32,
+    b: u32,
 }
 
 fn tmp_path() -> std::path::PathBuf {

@@ -1,3 +1,12 @@
 [workspace]
 resolver = "2"
 members = ["rta", "rta-derive"]
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+incremental = false
+opt-level = 3
+
+[profile.bench]
+inherits = "release"

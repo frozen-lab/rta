@@ -34,3 +34,7 @@ version = "0.3.0"
 
 [dev-dependencies.tempfile]
 version = "3.20.0"
+
+[[bench]]
+name = "write_latency"
+harness = false
