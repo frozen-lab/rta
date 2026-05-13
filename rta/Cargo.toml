@@ -17,6 +17,11 @@ categories = [
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/frozen-lab/rta"
 
+[package.metadata.docs.rs]
+default-target = "x86_64-unknown-linux-gnu"
+targets = ["aarch64-unknown-linux-gnu", "aarch64-apple-darwin"]
+additional-targets = ["i686-apple-darwin"]
+
 [lib]
 name = "rta"
 path = "src/lib.rs"
