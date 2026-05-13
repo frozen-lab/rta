@@ -2,7 +2,7 @@
 
 Ṛta (ऋत) is a minimal metadata store for durable system state.
 
-## Requirements of `T`
+## The type `T`
 
 T must satisfy following layout and safety constraints:
 
@@ -13,7 +13,7 @@ T must satisfy following layout and safety constraints:
 - Size must be >0 and multiple of 8
 - Implements `Default + Clone + Send + Sync + 'static`
 
-## Limitations of `T`
+#### Limitations of `T`
 
 - No non-deterministic feilds
 - No interior pointers or self-references
@@ -53,7 +53,7 @@ This call itself does **not** wait for disk synchronization on the fast path, al
 while still preserving crash-safe durability semantics by handing off durability responsibility to a background
 thread.
 
-### Guarantees
+#### Guarantees
 
 Following guarantees are provided,
 
@@ -61,7 +61,7 @@ Following guarantees are provided,
 - crash-safe durability via multiple on-disk copies
 - automatic recovery from torn writes using latest valid version
 
-### Benchmarks
+#### Benchmarks
 
 | Metric  | Latency |
 |:--------|:--------|
@@ -71,7 +71,7 @@ Following guarantees are provided,
 | P99     | 102 ns  |
 | P999    | 102 ns  |
 
-### Notes
+#### Notes
 
 - Most writes complete in ~100ns on the uncontended fast path.
 - The benchmark primarily measures,
@@ -81,10 +81,27 @@ Following guarantees are provided,
 - Disk durability is handled asynchronously by a dedicated background thread.
 - Tail latency may increase if writes overlap with active durability synchronization.
 
-## Read Operations
+## Reads
 
-The [`Rta::read`] returns the latest in-mem state. By default the read is optimistic and does not guarantee durability
-at read time.
+The [`Rta::read()`] operation returns the latest available in-memory metadata state.
+
+The read path is optimistic and does not provide durability guarantees at read time. Instead, reads are served
+directly from the synchronized in-memory cache, avoiding any disk IO overhead.
+
+#### Guarantees
+
+Following guarantees are provided,
+
+- lock-safe concurrent access
+- latest available in-memory metadata view
+- no torn or partially visible updates
+- parallel read operations
+
+#### Notes
+
+- Reads are performed entirely from the in-memory cache.
+- No mmap scan or disk synchronization occurs during the read path.
+- Read latency generally remains stable even during background durability synchronization.
 
 ## Concurrency Model
 
