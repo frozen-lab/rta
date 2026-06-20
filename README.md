@@ -6,6 +6,18 @@
 
 Ṛta (ऋत) is a minimal metadata store for durable system state.
 
+## Usage
+
+Add following to your `Cargo.toml`,
+
+```toml
+[dependencies]
+rta = { version = "0.0.2" }
+```
+
+> [!NOTE]
+> Current `rta` requires Rust 1.86 or later.
+
 ## The type `T`
 
 T must satisfy following layout and safety constraints:
