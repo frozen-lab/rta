@@ -2,8 +2,8 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(unused)]
 
-use frozen_core::{error, fmmap, reservoir};
-use std::{slice, time};
+use frozen_core::{crc32, error, fmmap, reservoir};
+use std::{slice, sync::atomic, time};
 
 /// Default flush duration used for [`FrozenMMap`]
 ///
@@ -42,8 +42,11 @@ pub struct RtaCfg {
 }
 
 pub struct Rta<T: RTA + Send + Sync + Clone + 'static> {
+    cfg: RtaCfg,
+    crc32c: crc32::Crc32C,
+    version: atomic::AtomicU32,
+    live_index: atomic::AtomicUsize,
     mmap: fmmap::FrozenMMap<DiskObject<T>>,
-    reservoir: reservoir::Reservoir<usize>,
 }
 
 unsafe impl<T> Send for Rta<T> where T: RTA + Send + Sync + Clone + 'static {}
@@ -51,47 +54,176 @@ unsafe impl<T> Sync for Rta<T> where T: RTA + Send + Sync + Clone + 'static {}
 
 impl<T> Rta<T>
 where
-    T: RTA + Default + Send + Sync + Clone + 'static,
+    T: RTA + Send + Sync + Clone + 'static,
 {
-    #[inline]
     pub fn new(cfg: RtaCfg) -> error::FrozenResult<Self> {
         let mmap = fmmap::FrozenMMap::new(
-            cfg.path,
+            cfg.path.clone(),
             fmmap::FrozenMMapCfg {
                 module_id: cfg.module_id,
                 immediate_durability: true,
-                initial_count: cfg.copies_on_disk,
+                initial_count: cfg.copies_on_disk as usize,
                 flush_duration: MMAP_FLUSH_DURATION,
             },
         )?;
-        let reservoir = reservoir::Reservoir::new((0..cfg.copies_on_disk).into_iter().collect());
 
-        Ok(Self { mmap, reservoir })
-    }
+        let crc32c = crc32::Crc32C::new();
+        let (index, version) = Self::init(cfg.copies_on_disk, &crc32c, &mmap)?;
 
-    #[inline]
-    pub fn clear(&mut self) -> error::FrozenResult<()> {
-        todo!()
+        Ok(Self {
+            cfg,
+            mmap,
+            crc32c,
+            version: atomic::AtomicU32::new(version),
+            live_index: atomic::AtomicUsize::new(index),
+        })
     }
 
     #[inline(always)]
-    pub fn write(&self, f: impl FnOnce(*mut T)) -> error::FrozenResult<()> {
-        let index = self.reservoir.acquire();
-        // self.mmap.write(index, f);
+    pub unsafe fn write(&self, f: impl FnOnce(&mut T)) -> error::FrozenResult<()> {
+        let next_version = self.version.load(atomic::Ordering::Acquire).wrapping_add(1);
+        let new_index = self.live_index.load(atomic::Ordering::Acquire) % self.cfg.copies_on_disk;
+
+        let _ticket = self.mmap.write(new_index, |entry| {
+            let di = &mut (*entry);
+
+            di.hsh = T::HASH;
+            di.ver = next_version;
+
+            f(&mut di.obj);
+            di.crc = self.crc32c.crc(to_bytes(&di.obj));
+        })?;
+
+        self.version.store(next_version, atomic::Ordering::Release);
+        Ok(())
+    }
+
+    #[inline]
+    pub unsafe fn read(&self) -> T {
+        let live_index = self.live_index.load(atomic::Ordering::Acquire);
+
+        // CRITICAL: The use of `unwrap` does no harm whatsoever as the `read` call does not return any
+        // sort of error and the use of `FrozenResult` is result of a mishap in the impl. When the update
+        // is published in `frozen_core` crate, this unwrap will be eliminated!!
+        //
+        // Issue in context => `https://github.com/frozen-lab/frozen-core/issues/76`
+
+        self.mmap
+            .read(live_index, |entry| {
+                let di = &*entry;
+                di.obj.clone()
+            })
+            .unwrap()
+    }
+
+    #[inline]
+    pub fn delete(&mut self) -> error::FrozenResult<()> {
+        todo!()
+    }
+
+    fn init(
+        copies_on_disk: usize,
+        crc32c: &crc32::Crc32C,
+        mmap: &fmmap::FrozenMMap<DiskObject<T>>,
+    ) -> error::FrozenResult<(usize, u32)> {
+        if let Some(best) = Self::init_checks(copies_on_disk, crc32c, mmap)? {
+            return Ok(best);
+        }
+
+        Self::init_copies_on_disk(copies_on_disk, crc32c, mmap)?;
+        Ok((0usize, 0u32))
+    }
+
+    fn init_checks(
+        copies_on_disk: usize,
+        crc32c: &crc32::Crc32C,
+        mmap: &fmmap::FrozenMMap<DiskObject<T>>,
+    ) -> error::FrozenResult<Option<(usize, u32)>> {
+        let mut best = None;
+        let mut seen_any = false;
+        let mut seen_compatible = false;
+
+        let current_entries_on_disk = mmap.total_slots();
+        if current_entries_on_disk < copies_on_disk {
+            return Err(err::new_err_default(err::CRP));
+        }
+
+        for index in 0..copies_on_disk {
+            unsafe {
+                mmap.read(index, |entry| {
+                    let di = &*entry;
+
+                    if di.hsh != 0 {
+                        seen_any = true;
+                    }
+
+                    if !di.iseq_hsh(T::HASH) {
+                        return;
+                    }
+
+                    seen_compatible = true;
+
+                    let crc = crc32c.crc(&to_bytes(&di.obj));
+                    if di.iseq_crc(crc) {
+                        best = Some((index, di.ver));
+                    }
+                })
+            };
+        }
+
+        if best.is_some() {
+            return Ok(best);
+        }
+
+        if seen_any && !seen_compatible {
+            return Err(err::new_err_default(err::HSH));
+        }
+
+        if seen_any {
+            return Err(err::new_err_default(err::CRP));
+        }
+
+        Ok(None)
+    }
+
+    fn init_copies_on_disk(
+        copies_on_disk: usize,
+        crc32c: &crc32::Crc32C,
+        mmap: &fmmap::FrozenMMap<DiskObject<T>>,
+    ) -> error::FrozenResult<()> {
+        let mut transaction = mmap.new_tx();
+        for index in 0..copies_on_disk {
+            let ver = if index == 0 { 1 } else { 0 };
+            let obj = T::default();
+
+            unsafe {
+                transaction.write(index, |entry| {
+                    let di = &mut (*entry);
+                })
+            }?;
+        }
+
+        // NOTE: we can simply disregard the ticket and optimistically assume durability as we
+        // are using the `immediate_durability` mode on `fmmap` which instantly flushes the write
+        // on the disk and marks it durable
+        let _ticket = transaction.commit()?;
         Ok(())
     }
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct DiskObject<T: RTA> {
+struct DiskObject<T: RTA + Send + Sync + Clone + 'static> {
     ver: u32,
     crc: u32,
     hsh: u64,
     obj: T,
 }
 
-impl<T: RTA> DiskObject<T> {
+impl<T> DiskObject<T>
+where
+    T: RTA + Send + Sync + Clone + 'static,
+{
     #[inline]
     fn iseq_crc(&self, crc: u32) -> bool {
         self.crc == crc
@@ -104,28 +236,28 @@ impl<T: RTA> DiskObject<T> {
 }
 
 #[inline]
-fn to_bytes<T: RTA>(t: &T) -> &[u8] {
+fn to_bytes<T: RTA + 'static>(t: &T) -> &[u8] {
     unsafe { slice::from_raw_parts(t as *const T as *const u8, T::SIZE) }
 }
 
 #[inline(always)]
-fn validate_t<T: RTA>() -> error::FrozenResult<()> {
+fn validate_t<T: RTA + 'static>() -> error::FrozenResult<()> {
     if std::mem::needs_drop::<T>() {
-        return err::new_err_default(err::DRP);
+        return Err(err::new_err_default(err::DRP));
     }
 
     let align = std::mem::align_of::<T>();
     if align != 8 {
-        return err::new_err_default(err::ALN);
+        return Err(err::new_err_default(err::ALN));
     }
 
     let size = std::mem::size_of::<T>();
     if size == 0 {
-        return err::new_err_default(err::ZRO);
+        return Err(err::new_err_default(err::ZRO));
     }
 
     if size % 8 != 0 {
-        return err::new_err_default(err::SZE);
+        return Err(err::new_err_default(err::SZE));
     }
 
     Ok(())
@@ -171,14 +303,12 @@ mod err {
     pub const SZE: ErrCode = ErrCode::new(0x0C, "T size must be multiple of 8");
 
     #[inline]
-    pub fn new_err<R, E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenResult<R> {
-        let err = FrozenError::new_raw(*mid(), ERRDOMAIN, code, error);
-        Err(err)
+    pub fn new_err<E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenError {
+        FrozenError::new_raw(*mid(), ERRDOMAIN, code, error)
     }
 
     #[inline]
-    pub fn new_err_default<R>(code: ErrCode) -> FrozenResult<R> {
-        let err = FrozenError::new_raw(*mid(), ERRDOMAIN, code, "");
-        Err(err)
+    pub fn new_err_default(code: ErrCode) -> FrozenError {
+        FrozenError::new_raw(*mid(), ERRDOMAIN, code, "")
     }
 }
