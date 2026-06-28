@@ -1,8 +1,7 @@
 // #![deny(missing_docs)]
 #![allow(unsafe_op_in_unsafe_fn)]
-#![allow(unused)]
 
-use frozen_core::{crc32, error, fmmap, reservoir};
+use frozen_core::{crc32, error, fmmap};
 use std::{slice, sync::atomic, time};
 
 /// Default flush duration used for [`FrozenMMap`]
@@ -57,6 +56,13 @@ where
     T: RTA + Send + Sync + Clone + 'static,
 {
     pub fn new(cfg: RtaCfg) -> error::FrozenResult<Self> {
+        // NOTE: The value is used for error logging and is initialized only once, as `OnceLock`
+        // guarantees that the first caller sets the value and all subsequent calls reuse it
+        let _ = err::MID.get_or_init(|| cfg.module_id);
+
+        // NOTE: we must validate `T` before mmap init, to avoid any UB errors
+        validate_t::<T>()?;
+
         let mmap = fmmap::FrozenMMap::new(
             cfg.path.clone(),
             fmmap::FrozenMMapCfg {
@@ -168,7 +174,7 @@ where
                         best = Some((index, di.ver));
                     }
                 })
-            };
+            }?;
         }
 
         if best.is_some() {
@@ -191,14 +197,22 @@ where
         crc32c: &crc32::Crc32C,
         mmap: &fmmap::FrozenMMap<DiskObject<T>>,
     ) -> error::FrozenResult<()> {
+        let def_obj = T::default();
+        let crc = crc32c.crc(to_bytes(&def_obj));
+
         let mut transaction = mmap.new_tx();
-        for index in 0..copies_on_disk {
-            let ver = if index == 0 { 1 } else { 0 };
-            let obj = T::default();
+        for i in 0..copies_on_disk {
+            let index = i;
+            let obj = def_obj.clone();
 
             unsafe {
-                transaction.write(index, |entry| {
+                transaction.write(index, move |entry| {
                     let di = &mut (*entry);
+
+                    di.crc = crc;
+                    di.obj = obj;
+                    di.hsh = T::HASH;
+                    di.ver = if index == 0 { 1 } else { 0 };
                 })
             }?;
         }
@@ -207,6 +221,7 @@ where
         // are using the `immediate_durability` mode on `fmmap` which instantly flushes the write
         // on the disk and marks it durable
         let _ticket = transaction.commit()?;
+
         Ok(())
     }
 }
@@ -264,7 +279,7 @@ fn validate_t<T: RTA + 'static>() -> error::FrozenResult<()> {
 }
 
 mod err {
-    use frozen_core::error::{ErrCode, FrozenError, FrozenResult};
+    use frozen_core::error::{ErrCode, FrozenError};
 
     /// Domain Id for [`FrozenMMap`] is **20**
     const ERRDOMAIN: u8 = 0x14;
@@ -301,11 +316,6 @@ mod err {
 
     /// `size_of::<T>()` is not multiple of 8
     pub const SZE: ErrCode = ErrCode::new(0x0C, "T size must be multiple of 8");
-
-    #[inline]
-    pub fn new_err<E: std::fmt::Display>(code: ErrCode, error: E) -> FrozenError {
-        FrozenError::new_raw(*mid(), ERRDOMAIN, code, error)
-    }
 
     #[inline]
     pub fn new_err_default(code: ErrCode) -> FrozenError {
