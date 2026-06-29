@@ -114,12 +114,10 @@ where
         //
         // Issue in context => `https://github.com/frozen-lab/frozen-core/issues/76`
 
-        self.mmap
-            .read(live_index, |entry| {
-                let di = &*entry;
-                di.obj.clone()
-            })
-            .unwrap()
+        self.mmap.read(live_index, |entry| {
+            let di = &*entry;
+            di.obj.clone()
+        })
     }
 
     #[inline]
@@ -174,7 +172,7 @@ where
                         best = Some((index, di.ver));
                     }
                 })
-            }?;
+            };
         }
 
         if best.is_some() {
@@ -217,10 +215,8 @@ where
             }?;
         }
 
-        // NOTE: we can simply disregard the ticket and optimistically assume durability as we
-        // are using the `immediate_durability` mode on `fmmap` which instantly flushes the write
-        // on the disk and marks it durable
-        let _ticket = transaction.commit()?;
+        let ticket = transaction.commit()?;
+        let _ = ticket.wait()?;
 
         Ok(())
     }

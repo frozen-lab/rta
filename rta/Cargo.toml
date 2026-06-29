@@ -28,7 +28,7 @@ name = "rta"
 path = "src/lib.rs"
 
 [dependencies.frozen-core]
-version = "0.0.29"
+version = "0.0.30"
 default-features = false
 features = [
     "ack",
@@ -36,7 +36,6 @@ features = [
     "hints",
     "crc32",
     "fmmap",
-    "reservoir",
 ]
 
 [dependencies.rta-derive]

@@ -76,9 +76,9 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "frozen-core"
-version = "0.0.29"
+version = "0.0.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78d87d5b84cffe39877a9c95049c202333247f56330382b747487cf3e65c4a4e"
+checksum = "df6b12a314528122eda8a90c59e70a53ecced58305fe71e10a528998f68873d2"
 dependencies = [
  "event-listener",
  "futures",
