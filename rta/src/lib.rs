@@ -122,7 +122,7 @@ where
 
     #[inline]
     pub fn delete(&mut self) -> error::FrozenResult<()> {
-        todo!()
+        self.mmap.delete()
     }
 
     fn init(
