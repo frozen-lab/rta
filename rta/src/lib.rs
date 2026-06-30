@@ -129,8 +129,7 @@ where
             return Ok(best);
         }
 
-        Self::init_copies_on_disk(copies_on_disk, crc32c, mmap)?;
-        Ok(0u32)
+        Self::init_copies_on_disk(copies_on_disk, crc32c, mmap)
     }
 
     fn init_checks(
@@ -165,7 +164,7 @@ where
                     let crc = crc32c.crc(&to_bytes(&di.obj));
                     if di.iseq_crc(crc) {
                         match best {
-                            Some(version) if version >= di.ver => {}
+                            Some(version) if !is_newer_version(di.ver, version) => {}
                             _ => best = Some(di.ver),
                         }
                     }
@@ -192,7 +191,7 @@ where
         copies_on_disk: usize,
         crc32c: &crc32::Crc32C,
         mmap: &fmmap::FrozenMMap<DiskObject<T>>,
-    ) -> error::FrozenResult<()> {
+    ) -> error::FrozenResult<u32> {
         let def_obj = T::default();
         let crc = crc32c.crc(to_bytes(&def_obj));
 
@@ -216,7 +215,15 @@ where
         let ticket = transaction.commit()?;
         let _ = ticket.wait()?;
 
-        Ok(())
+        // NOTE: On new init, we start version from `1` instead of `0` cause we seed the very first
+        // on-disk copy (at index 0) w/ version `1`. Returning `0` would cause the first user write
+        // to also allocate the version `1`, resulting in two valid copies w/ same version, i.e.
+        // entry at index 0 and also at index 1 would have `ver` set to 1.
+        //
+        // During recovery, this makes it impossible to deterministically identify the latest copy,
+        // as the both the entries copare equal. By starting w/ `1`, we elimiate this scenerio,
+        // where the first user write starts from `ver` set to `2`.
+        Ok(1u32)
     }
 }
 
@@ -270,6 +277,11 @@ fn validate_t<T: RTA + 'static>() -> error::FrozenResult<()> {
     }
 
     Ok(())
+}
+
+#[inline]
+fn is_newer_version(a: u32, b: u32) -> bool {
+    a.wrapping_sub(b) < (1 << 0x1F)
 }
 
 mod err {
