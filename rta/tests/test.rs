@@ -28,7 +28,7 @@ mod new {
     #[test]
     fn ok_new() {
         let (_path, cfg) = prep_init(0x0A);
-        let rta = Rta::<Type>::new(cfg).expect("failed to create rta");
+        let rta = Rta::<Type>::new(cfg).unwrap();
 
         assert_eq!(unsafe { rta.read() }, Type::default());
     }
@@ -38,22 +38,22 @@ mod new {
         let (_path, cfg) = prep_init(0x0A);
 
         {
-            let rta = Rta::<Type>::new(cfg.clone()).expect("failed to create rta");
+            let rta = Rta::<Type>::new(cfg.clone()).unwrap();
 
             unsafe {
                 let ticket = rta
                     .write(|t| {
-                        t.a = 10;
-                        t.b = 20;
+                        t.a = 0x0A;
+                        t.b = 0x14;
                     })
-                    .expect("failed to write");
+                    .unwrap();
 
-                ticket.wait().expect("failed waiting for durability");
+                ticket.wait().unwrap();
             }
         }
 
-        let rta = Rta::<Type>::new(cfg).expect("failed to reopen");
-        assert_eq!(unsafe { rta.read() }, Type { a: 10, b: 20 });
+        let rta = Rta::<Type>::new(cfg).unwrap();
+        assert_eq!(unsafe { rta.read() }, Type { a: 0x0A, b: 0x14 });
     }
 
     #[test]
@@ -132,5 +132,144 @@ mod new {
             path: path,
         };
         let _ = Rta::<Type>::new(cfg);
+    }
+}
+
+mod recovery {
+    use super::*;
+
+    #[test]
+    fn ok_single_restart() {
+        let (_path, cfg) = prep_init(0x0A);
+
+        {
+            let rta = Rta::<Type>::new(cfg.clone()).unwrap();
+            unsafe {
+                rta.write(|t| {
+                    t.a = 0x0A;
+                    t.b = 0x14;
+                })
+                .unwrap()
+                .wait()
+                .unwrap();
+            }
+        }
+
+        let rta = Rta::<Type>::new(cfg).unwrap();
+        assert_eq!(unsafe { rta.read() }, Type { a: 0x0A, b: 0x14 });
+    }
+
+    #[test]
+    fn ok_multiple_restarts() {
+        let (_path, cfg) = prep_init(0x0A);
+
+        for i in 0..0x0A {
+            let rta = Rta::<Type>::new(cfg.clone()).unwrap();
+            unsafe {
+                rta.write(|t| {
+                    t.a = i;
+                    t.b = i + 1;
+                })
+                .unwrap()
+                .wait()
+                .unwrap();
+            }
+        }
+
+        let rta = Rta::<Type>::new(cfg).unwrap();
+        assert_eq!(unsafe { rta.read() }, Type { a: 9, b: 0x0A });
+    }
+
+    #[test]
+    fn ok_latest_value_restored() {
+        let (_path, cfg) = prep_init(0x0A);
+
+        {
+            let rta = Rta::<Type>::new(cfg.clone()).unwrap();
+            for i in 0..0x20 {
+                unsafe {
+                    rta.write(|t| {
+                        t.a = i;
+                        t.b = i * 2;
+                    })
+                    .unwrap()
+                    .wait()
+                    .unwrap();
+                }
+            }
+        }
+
+        let rta = Rta::<Type>::new(cfg).unwrap();
+        assert_eq!(unsafe { rta.read() }, Type { a: 0x1F, b: 0x3E });
+    }
+
+    #[test]
+    fn ok_wraparound_recovery() {
+        let (_path, cfg) = prep_init(2);
+
+        {
+            let rta = Rta::<Type>::new(cfg.clone()).unwrap();
+            for i in 0..0x64 {
+                unsafe {
+                    rta.write(|t| {
+                        t.a = i;
+                        t.b = i;
+                    })
+                    .unwrap()
+                    .wait()
+                    .unwrap();
+                }
+            }
+        }
+
+        let rta = Rta::<Type>::new(cfg).unwrap();
+        assert_eq!(unsafe { rta.read() }, Type { a: 0x63, b: 0x63 });
+    }
+}
+
+mod delete {
+    use super::*;
+
+    #[test]
+    fn ok_delete() {
+        let (path, cfg) = prep_init(0x0A);
+        let mut rta = Rta::<Type>::new(cfg).unwrap();
+
+        rta.delete().unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn ok_delete_then_new() {
+        let (_path, cfg) = prep_init(0x0A);
+
+        {
+            let mut rta = Rta::<Type>::new(cfg.clone()).unwrap();
+            unsafe {
+                rta.write(|t| {
+                    t.a = 0x7B;
+                    t.b = 0x1C8;
+                })
+                .unwrap()
+                .wait()
+                .unwrap();
+            }
+
+            rta.delete().unwrap();
+        }
+
+        let rta = Rta::<Type>::new(cfg).unwrap();
+        assert_eq!(unsafe { rta.read() }, Type::default());
+    }
+
+    #[test]
+    fn err_delete_twice() {
+        let (_path, cfg) = prep_init(0x0A);
+        let mut rta = Rta::<Type>::new(cfg).unwrap();
+
+        rta.delete().unwrap();
+
+        let res = rta.delete();
+        assert!(res.is_err());
     }
 }
