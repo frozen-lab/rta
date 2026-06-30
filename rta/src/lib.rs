@@ -340,3 +340,35 @@ mod err {
         FrozenError::new_raw(*mid(), ERRDOMAIN, code, "")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ok_forward() {
+        assert!(is_newer_version(2, 1));
+        assert!(is_newer_version(0x64, 0x63));
+    }
+
+    #[test]
+    fn err_equal() {
+        assert!(!is_newer_version(0x0A, 0x0A));
+    }
+
+    #[test]
+    fn err_older() {
+        assert!(!is_newer_version(5, 6));
+    }
+
+    #[test]
+    fn ok_wraparound() {
+        assert!(is_newer_version(0, u32::MAX));
+        assert!(is_newer_version(1, u32::MAX));
+    }
+
+    #[test]
+    fn err_half_range() {
+        assert!(!is_newer_version(1 << 0x1F, 0));
+    }
+}
