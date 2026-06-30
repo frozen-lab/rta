@@ -4,6 +4,9 @@
 use frozen_core::{ack, crc32, error, fmmap};
 use std::{slice, sync::atomic, time};
 
+/// Procedural macro implementation for `#[derive(RTA)]`
+pub use rta_derive::RTA;
+
 /// Default flush duration used for [`FrozenMMap`]
 ///
 /// ## NOTE
@@ -34,6 +37,7 @@ pub unsafe trait RTA: Sized + Default {
     const SIZE: usize;
 }
 
+#[derive(Debug, Clone)]
 pub struct RtaCfg {
     pub module_id: u8,
     pub copies_on_disk: usize,
@@ -288,7 +292,8 @@ fn validate_t<T: RTA + 'static>() -> error::FrozenResult<()> {
 
 #[inline]
 fn is_newer_version(a: u32, b: u32) -> bool {
-    a.wrapping_sub(b) < (1 << 0x1F)
+    let diff = a.wrapping_sub(b);
+    diff != 0 && diff < (1 << 0x1F)
 }
 
 mod err {
