@@ -1,7 +1,7 @@
 // #![deny(missing_docs)]
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use frozen_core::{crc32, error, fmmap};
+use frozen_core::{ack, crc32, error, fmmap};
 use std::{slice, sync::atomic, time};
 
 /// Default flush duration used for [`FrozenMMap`]
@@ -44,7 +44,7 @@ pub struct Rta<T: RTA + Send + Sync + Clone + 'static> {
     cfg: RtaCfg,
     crc32c: crc32::Crc32C,
     version: atomic::AtomicU32,
-    live_index: atomic::AtomicUsize,
+    published_version: atomic::AtomicU32,
     mmap: fmmap::FrozenMMap<DiskObject<T>>,
 }
 
@@ -74,45 +74,40 @@ where
         )?;
 
         let crc32c = crc32::Crc32C::new();
-        let (index, version) = Self::init(cfg.copies_on_disk, &crc32c, &mmap)?;
+        let version = Self::init(cfg.copies_on_disk, &crc32c, &mmap)?;
 
         Ok(Self {
             cfg,
             mmap,
             crc32c,
             version: atomic::AtomicU32::new(version),
-            live_index: atomic::AtomicUsize::new(index),
+            published_version: atomic::AtomicU32::new(version),
         })
     }
 
     #[inline(always)]
-    pub unsafe fn write(&self, f: impl FnOnce(&mut T)) -> error::FrozenResult<()> {
-        let next_version = self.version.load(atomic::Ordering::Acquire).wrapping_add(1);
-        let new_index = self.live_index.load(atomic::Ordering::Acquire) % self.cfg.copies_on_disk;
+    pub unsafe fn write(&self, f: impl FnOnce(&mut T)) -> error::FrozenResult<ack::AckTicket> {
+        let new_version = self.version.fetch_add(1, atomic::Ordering::AcqRel).wrapping_add(1);
+        let live_index = new_version as usize % self.cfg.copies_on_disk;
 
-        let _ticket = self.mmap.write(new_index, |entry| {
+        let ticket = self.mmap.write(live_index, |entry| {
             let di = &mut (*entry);
 
             di.hsh = T::HASH;
-            di.ver = next_version;
+            di.ver = new_version;
 
             f(&mut di.obj);
             di.crc = self.crc32c.crc(to_bytes(&di.obj));
         })?;
 
-        self.version.store(next_version, atomic::Ordering::Release);
-        Ok(())
+        self.published_version.store(new_version, atomic::Ordering::Release);
+        Ok(ticket)
     }
 
     #[inline]
     pub unsafe fn read(&self) -> T {
-        let live_index = self.live_index.load(atomic::Ordering::Acquire);
-
-        // CRITICAL: The use of `unwrap` does no harm whatsoever as the `read` call does not return any
-        // sort of error and the use of `FrozenResult` is result of a mishap in the impl. When the update
-        // is published in `frozen_core` crate, this unwrap will be eliminated!!
-        //
-        // Issue in context => `https://github.com/frozen-lab/frozen-core/issues/76`
+        let live_version = self.published_version.load(atomic::Ordering::Acquire);
+        let live_index = live_version as usize % self.cfg.copies_on_disk;
 
         self.mmap.read(live_index, |entry| {
             let di = &*entry;
@@ -129,20 +124,20 @@ where
         copies_on_disk: usize,
         crc32c: &crc32::Crc32C,
         mmap: &fmmap::FrozenMMap<DiskObject<T>>,
-    ) -> error::FrozenResult<(usize, u32)> {
+    ) -> error::FrozenResult<u32> {
         if let Some(best) = Self::init_checks(copies_on_disk, crc32c, mmap)? {
             return Ok(best);
         }
 
         Self::init_copies_on_disk(copies_on_disk, crc32c, mmap)?;
-        Ok((0usize, 0u32))
+        Ok(0u32)
     }
 
     fn init_checks(
         copies_on_disk: usize,
         crc32c: &crc32::Crc32C,
         mmap: &fmmap::FrozenMMap<DiskObject<T>>,
-    ) -> error::FrozenResult<Option<(usize, u32)>> {
+    ) -> error::FrozenResult<Option<u32>> {
         let mut best = None;
         let mut seen_any = false;
         let mut seen_compatible = false;
@@ -169,7 +164,10 @@ where
 
                     let crc = crc32c.crc(&to_bytes(&di.obj));
                     if di.iseq_crc(crc) {
-                        best = Some((index, di.ver));
+                        match best {
+                            Some(version) if version >= di.ver => {}
+                            _ => best = Some(di.ver),
+                        }
                     }
                 })
             };
