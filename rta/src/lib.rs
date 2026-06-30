@@ -56,6 +56,13 @@ where
     T: RTA + Send + Sync + Clone + 'static,
 {
     pub fn new(cfg: RtaCfg) -> error::FrozenResult<Self> {
+        // sanity check
+        assert!(cfg.copies_on_disk > 1, "Copies on disk must be greater then 1");
+        assert!(
+            cfg.copies_on_disk < u32::MAX as usize,
+            "Copies on disk must be smaller then u32::MAX"
+        );
+
         // NOTE: The value is used for error logging and is initialized only once, as `OnceLock`
         // guarantees that the first caller sets the value and all subsequent calls reuse it
         let _ = err::MID.get_or_init(|| cfg.module_id);
