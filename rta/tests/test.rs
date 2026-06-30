@@ -1,4 +1,8 @@
 use rta::{RTA, Rta, RtaCfg};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 const MOD_ID: u8 = 0x00;
 
@@ -271,5 +275,216 @@ mod delete {
 
         let res = rta.delete();
         assert!(res.is_err());
+    }
+}
+
+mod write_read {
+    use super::*;
+
+    #[test]
+    fn ok_read_default() {
+        let (_path, cfg) = prep_init(0x0A);
+        let rta = Rta::<Type>::new(cfg).unwrap();
+
+        assert_eq!(unsafe { rta.read() }, Type::default());
+    }
+
+    #[test]
+    fn ok_read_reads_the_latest_write() {
+        let (_path, cfg) = prep_init(0x0A);
+        let rta = Rta::<Type>::new(cfg).unwrap();
+
+        unsafe {
+            rta.write(|t| {
+                t.a = 0xAA;
+                t.b = 0xBB;
+            })
+            .unwrap()
+            .wait()
+            .unwrap();
+        }
+
+        assert_eq!(unsafe { rta.read() }, Type { a: 0xAA, b: 0xBB });
+    }
+
+    #[test]
+    fn ok_read_after_many_writes() {
+        let (_path, cfg) = prep_init(0x0A);
+        let rta = Rta::<Type>::new(cfg).unwrap();
+
+        let mut ticket = None;
+        for i in 0..0x1000 {
+            ticket = Some(
+                unsafe {
+                    rta.write(|t| {
+                        t.a = i;
+                        t.b = !i;
+                    })
+                }
+                .unwrap(),
+            );
+        }
+
+        ticket.unwrap().wait().unwrap();
+        assert_eq!(unsafe { rta.read() }, Type { a: 0xFFF, b: !0xFFF });
+    }
+
+    #[test]
+    fn ok_reads_during_concurrent_writes() {
+        let (_path, cfg) = prep_init(4);
+
+        let done = Arc::new(AtomicBool::new(false));
+        let rta = Arc::new(Rta::<Type>::new(cfg).unwrap());
+
+        let writer = {
+            let rta = Arc::clone(&rta);
+            let done = Arc::clone(&done);
+
+            std::thread::spawn(move || {
+                let mut ticket = None;
+                for i in 0..0x1000 {
+                    ticket = Some(
+                        unsafe {
+                            rta.write(|t| {
+                                t.a = i;
+                                t.b = i;
+                            })
+                        }
+                        .unwrap(),
+                    );
+                }
+
+                ticket.unwrap().wait().unwrap();
+                done.store(true, Ordering::Release);
+            })
+        };
+
+        while !done.load(Ordering::Acquire) {
+            let _ = unsafe { rta.read() };
+        }
+
+        writer.join().unwrap();
+        assert_eq!(unsafe { rta.read() }, Type { a: 0xFFF, b: 0xFFF });
+    }
+
+    #[test]
+    fn ok_write_read_single() {
+        let (_path, cfg) = prep_init(0x0A);
+        let rta = Rta::<Type>::new(cfg).unwrap();
+
+        unsafe {
+            rta.write(|t| {
+                t.a = 0x10;
+                t.b = 0x20;
+            })
+            .unwrap()
+            .wait()
+            .unwrap();
+        }
+
+        assert_eq!(unsafe { rta.read() }, Type { a: 0x10, b: 0x20 });
+    }
+
+    #[test]
+    fn ok_multiple_sequential() {
+        let (_path, cfg) = prep_init(0x0A);
+        let rta = Rta::<Type>::new(cfg).unwrap();
+
+        let mut ticket = None;
+        for i in 0..0x1000 {
+            ticket = Some(
+                unsafe {
+                    rta.write(|t| {
+                        t.a = i;
+                        t.b = i + 1;
+                    })
+                }
+                .unwrap(),
+            );
+        }
+
+        ticket.unwrap().wait().unwrap();
+
+        assert_eq!(unsafe { rta.read() }, Type { a: 0xFFF, b: 0x1000 });
+    }
+
+    #[test]
+    fn ok_returns_ack_ticket() {
+        let (_path, cfg) = prep_init(0x0A);
+        let rta = Rta::<Type>::new(cfg).unwrap();
+
+        unsafe {
+            let ticket = rta
+                .write(|t| {
+                    t.a = 0x2A;
+                })
+                .unwrap();
+
+            ticket.wait().unwrap();
+        }
+
+        assert_eq!(unsafe { rta.read() }, Type { a: 0x2A, b: 0 });
+    }
+
+    #[test]
+    fn ok_concurrent_writes() {
+        use std::sync::Arc;
+
+        const THREADS: usize = 4;
+        const WRITES: usize = 0x1000;
+
+        let (_path, cfg) = prep_init(0x40);
+        let rta = Arc::new(Rta::<Type>::new(cfg).unwrap());
+
+        let mut handles = Vec::new();
+        for tid in 0..THREADS {
+            let rta = Arc::clone(&rta);
+
+            handles.push(std::thread::spawn(move || {
+                let mut ticket = None;
+
+                for i in 0..WRITES {
+                    ticket = Some(
+                        unsafe {
+                            rta.write(|t| {
+                                t.a = tid as u32;
+                                t.b = i as u32;
+                            })
+                        }
+                        .unwrap(),
+                    );
+                }
+
+                ticket.unwrap().wait().unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let _ = unsafe { rta.read() };
+    }
+
+    #[test]
+    fn ok_wraparound_many_times() {
+        let (_path, cfg) = prep_init(2);
+        let rta = Rta::<Type>::new(cfg).unwrap();
+
+        let mut ticket = None;
+        for i in 0..0x1000 {
+            ticket = Some(
+                unsafe {
+                    rta.write(|t| {
+                        t.a = i;
+                        t.b = i;
+                    })
+                }
+                .unwrap(),
+            );
+        }
+
+        ticket.unwrap().wait().unwrap();
+        assert_eq!(unsafe { rta.read() }, Type { a: 0xFFF, b: 0xFFF });
     }
 }
