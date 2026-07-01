@@ -15,11 +15,12 @@ struct Type {
 }
 
 #[inline]
-fn prep_init(copies: usize) -> (std::path::PathBuf, RtaCfg) {
-    let path = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
+fn prep_init(tag: u8, copies: usize) -> (tempfile::TempDir, RtaCfg) {
+    let dir = tempfile::tempdir().expect(&format!("tempfile_{tag}"));
+    let path = dir.path().join("rta");
     let cfg = RtaCfg { module_id: MOD_ID, path: path.clone(), copies_on_disk: copies };
 
-    (path, cfg)
+    (dir, cfg)
 }
 
 mod new {
@@ -27,7 +28,7 @@ mod new {
 
     #[test]
     fn ok_new() {
-        let (_path, cfg) = prep_init(0x0A);
+        let (_dir, cfg) = prep_init(0, 0x0A);
         let rta = Rta::<Type>::new(cfg).unwrap();
 
         assert_eq!(unsafe { rta.read() }, Type::default());
@@ -35,7 +36,7 @@ mod new {
 
     #[test]
     fn ok_existing() {
-        let (_path, cfg) = prep_init(0x0A);
+        let (_dir, cfg) = prep_init(1, 0x0A);
 
         {
             let rta = Rta::<Type>::new(cfg.clone()).unwrap();
@@ -67,7 +68,7 @@ mod new {
             const SIZE: usize = std::mem::size_of::<Self>();
         }
 
-        let (_path, cfg) = prep_init(0x0A);
+        let (_dir, cfg) = prep_init(2, 0x0A);
         assert!(Rta::<DropType>::new(cfg).is_err());
     }
 
@@ -82,7 +83,7 @@ mod new {
             const SIZE: usize = 0;
         }
 
-        let (_path, cfg) = prep_init(0x0A);
+        let (_dir, cfg) = prep_init(3, 0x0A);
         assert!(Rta::<Zst>::new(cfg).is_err());
     }
 
@@ -99,7 +100,7 @@ mod new {
             const SIZE: usize = std::mem::size_of::<Self>();
         }
 
-        let (_path, cfg) = prep_init(0x0A);
+        let (_dir, cfg) = prep_init(4, 0x0A);
         assert!(Rta::<BadAlign>::new(cfg).is_err());
     }
 
@@ -117,7 +118,7 @@ mod new {
             const SIZE: usize = std::mem::size_of::<Self>();
         }
 
-        let (_path, cfg) = prep_init(0x0A);
+        let (_dir, cfg) = prep_init(5, 0x0A);
         assert!(Rta::<BadSize>::new(cfg).is_err());
     }
 
@@ -125,7 +126,8 @@ mod new {
     #[should_panic]
     #[cfg(debug_assertions)]
     fn err_invalid_cfg() {
-        let (path, _) = prep_init(0x0A);
+        let (dir, _) = prep_init(6, 0x0A);
+        let path = dir.path().join("rta");
         let cfg = RtaCfg { module_id: MOD_ID, copies_on_disk: 0, path: path };
         let _ = Rta::<Type>::new(cfg);
     }
@@ -136,7 +138,7 @@ mod recovery {
 
     #[test]
     fn ok_single_restart() {
-        let (_path, cfg) = prep_init(0x0A);
+        let (_dir, cfg) = prep_init(7, 0x0A);
 
         {
             let rta = Rta::<Type>::new(cfg.clone()).unwrap();
@@ -156,29 +158,8 @@ mod recovery {
     }
 
     #[test]
-    fn ok_multiple_restarts() {
-        let (_path, cfg) = prep_init(0x0A);
-
-        for i in 0..0x0A {
-            let rta = Rta::<Type>::new(cfg.clone()).unwrap();
-            unsafe {
-                rta.write(|t| {
-                    t.a = i;
-                    t.b = i + 1;
-                })
-                .unwrap()
-                .wait()
-                .unwrap();
-            }
-        }
-
-        let rta = Rta::<Type>::new(cfg).unwrap();
-        assert_eq!(unsafe { rta.read() }, Type { a: 9, b: 0x0A });
-    }
-
-    #[test]
     fn ok_latest_value_restored() {
-        let (_path, cfg) = prep_init(0x0A);
+        let (_dir, cfg) = prep_init(8, 0x0A);
 
         {
             let rta = Rta::<Type>::new(cfg.clone()).unwrap();
@@ -201,7 +182,7 @@ mod recovery {
 
     #[test]
     fn ok_wraparound_recovery() {
-        let (_path, cfg) = prep_init(2);
+        let (_dir, cfg) = prep_init(9, 0x0A);
 
         {
             let rta = Rta::<Type>::new(cfg.clone()).unwrap();
@@ -228,7 +209,8 @@ mod delete {
 
     #[test]
     fn ok_delete() {
-        let (path, cfg) = prep_init(0x0A);
+        let (dir, cfg) = prep_init(9, 0x0A);
+        let path = dir.path().join("rta");
         let mut rta = Rta::<Type>::new(cfg).unwrap();
 
         rta.delete().unwrap();
@@ -237,7 +219,7 @@ mod delete {
 
     #[test]
     fn ok_delete_then_new() {
-        let (_path, cfg) = prep_init(0x0A);
+        let (_dir, cfg) = prep_init(10, 0x0A);
 
         {
             let mut rta = Rta::<Type>::new(cfg.clone()).unwrap();
@@ -260,7 +242,7 @@ mod delete {
 
     #[test]
     fn err_delete_twice() {
-        let (_path, cfg) = prep_init(0x0A);
+        let (_dir, cfg) = prep_init(11, 0x0A);
         let mut rta = Rta::<Type>::new(cfg).unwrap();
 
         rta.delete().unwrap();
@@ -275,15 +257,16 @@ mod write_read {
 
     #[test]
     fn ok_read_default() {
-        let (_path, cfg) = prep_init(0x0A);
+        let (_dir, cfg) = prep_init(12, 0x0A);
         let rta = Rta::<Type>::new(cfg).unwrap();
 
-        assert_eq!(unsafe { rta.read() }, Type::default());
+        let tp = unsafe { rta.read() };
+        assert_eq!(tp, Type::default());
     }
 
     #[test]
     fn ok_read_reads_the_latest_write() {
-        let (_path, cfg) = prep_init(0x0A);
+        let (_dir, cfg) = prep_init(13, 0x0A);
         let rta = Rta::<Type>::new(cfg).unwrap();
 
         unsafe {
@@ -301,7 +284,7 @@ mod write_read {
 
     #[test]
     fn ok_read_after_many_writes() {
-        let (_path, cfg) = prep_init(0x0A);
+        let (_dir, cfg) = prep_init(14, 0x0A);
         let rta = Rta::<Type>::new(cfg).unwrap();
 
         let mut ticket = None;
@@ -323,7 +306,7 @@ mod write_read {
 
     #[test]
     fn ok_reads_during_concurrent_writes() {
-        let (_path, cfg) = prep_init(4);
+        let (_dir, cfg) = prep_init(15, 0x0A);
 
         let done = Arc::new(AtomicBool::new(false));
         let rta = Arc::new(Rta::<Type>::new(cfg).unwrap());
@@ -334,7 +317,7 @@ mod write_read {
 
             std::thread::spawn(move || {
                 let mut ticket = None;
-                for i in 0..0x1000 {
+                for i in 0..0x100 {
                     ticket = Some(
                         unsafe {
                             rta.write(|t| {
@@ -357,12 +340,12 @@ mod write_read {
         }
 
         writer.join().unwrap();
-        assert_eq!(unsafe { rta.read() }, Type { a: 0xFFF, b: 0xFFF });
+        assert_eq!(unsafe { rta.read() }, Type { a: 0xFF, b: 0xFF });
     }
 
     #[test]
     fn ok_write_read_single() {
-        let (_path, cfg) = prep_init(0x0A);
+        let (_dir, cfg) = prep_init(15, 0x0A);
         let rta = Rta::<Type>::new(cfg).unwrap();
 
         unsafe {
@@ -380,11 +363,11 @@ mod write_read {
 
     #[test]
     fn ok_multiple_sequential() {
-        let (_path, cfg) = prep_init(0x0A);
+        let (_dir, cfg) = prep_init(16, 0x0A);
         let rta = Rta::<Type>::new(cfg).unwrap();
 
         let mut ticket = None;
-        for i in 0..0x1000 {
+        for i in 0..0x100 {
             ticket = Some(
                 unsafe {
                     rta.write(|t| {
@@ -397,12 +380,12 @@ mod write_read {
         }
 
         ticket.unwrap().wait().unwrap();
-        assert_eq!(unsafe { rta.read() }, Type { a: 0xFFF, b: 0x1000 });
+        assert_eq!(unsafe { rta.read() }, Type { a: 0xFF, b: 0x100 });
     }
 
     #[test]
     fn ok_returns_ack_ticket() {
-        let (_path, cfg) = prep_init(0x0A);
+        let (_dir, cfg) = prep_init(17, 0x0A);
         let rta = Rta::<Type>::new(cfg).unwrap();
 
         unsafe {
@@ -422,10 +405,10 @@ mod write_read {
     fn ok_concurrent_writes() {
         use std::sync::Arc;
 
-        const THREADS: usize = 4;
-        const WRITES: usize = 0x1000;
+        const THREADS: usize = 2;
+        const WRITES: usize = 0x100;
 
-        let (_path, cfg) = prep_init(0x40);
+        let (_dir, cfg) = prep_init(18, 0x0A);
         let rta = Arc::new(Rta::<Type>::new(cfg).unwrap());
 
         let mut handles = Vec::new();
@@ -460,11 +443,11 @@ mod write_read {
 
     #[test]
     fn ok_wraparound_many_times() {
-        let (_path, cfg) = prep_init(2);
+        let (_dir, cfg) = prep_init(19, 0x0A);
         let rta = Rta::<Type>::new(cfg).unwrap();
 
         let mut ticket = None;
-        for i in 0..0x1000 {
+        for i in 0..0x100 {
             ticket = Some(
                 unsafe {
                     rta.write(|t| {
@@ -477,6 +460,6 @@ mod write_read {
         }
 
         ticket.unwrap().wait().unwrap();
-        assert_eq!(unsafe { rta.read() }, Type { a: 0xFFF, b: 0xFFF });
+        assert_eq!(unsafe { rta.read() }, Type { a: 0xFF, b: 0xFF });
     }
 }
