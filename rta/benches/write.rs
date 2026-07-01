@@ -104,6 +104,7 @@ fn multi_tx_write_latency() -> BenchResult {
 }
 
 fn print_results(single: &BenchResult, multi: &BenchResult) {
+    print!("Totale measured operations: {OPS}");
     println!();
     println!("| Metric  | Single TX (µs) | Multi TX (µs) |");
     println!("|:--------|:---------------|:--------------|");

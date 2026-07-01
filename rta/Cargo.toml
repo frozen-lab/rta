@@ -61,3 +61,7 @@ harness = false
 [[bench]]
 name = "read"
 harness = false
+
+[[bench]]
+name = "durable_write"
+harness = false
