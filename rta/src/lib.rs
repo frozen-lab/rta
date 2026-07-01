@@ -108,7 +108,7 @@
 //! assert_eq!(cfg.value, 0x2A);
 //! ```
 
-// #![deny(missing_docs)]
+#![deny(missing_docs)]
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use frozen_core::{ack, crc32, error, fmmap};
@@ -139,6 +139,22 @@ const MMAP_FLUSH_DURATION: time::Duration = time::Duration::from_secs(1);
 /// and deterministic id for a given type `T`
 ///
 /// This is to track any changes in the implementation of type `T`
+///
+/// ## Example
+///
+/// ```
+/// use rta::RTA;
+///
+/// #[repr(C)]
+/// #[repr(align(8))]
+/// #[derive(Debug, Clone, Default, RTA)]
+/// struct Metadata {
+///   id: u64,
+///   name: [u8; 0x10],
+/// }
+///
+/// // NOTE: Absence of compiler error states the `RTA` is derived correctly.
+/// ```
 pub unsafe trait RTA: Sized + Default {
     /// deterministic precomputed (at compile time) `u64` hash for type `T`
     const HASH: u64;
@@ -147,13 +163,63 @@ pub unsafe trait RTA: Sized + Default {
     const SIZE: usize;
 }
 
+/// Configuration used when creating an [`Rta`] instance
+///
+/// *NOTE:* The configuration must be immutable for the current and future lifetimes of the object
+///
+/// ## Example
+///
+/// ```
+/// use rta::{RTA, Rta, RtaCfg};
+///
+/// let dir = tempfile::tempdir().expect("tempdir");
+/// let rta = RtaCfg {
+///     module_id: 1,
+///     copies_on_disk: 4,
+///     path: dir.path().join("state"),
+/// };
+///
+/// assert!(rta.copies_on_disk == 4);
+/// ```
 #[derive(Debug, Clone)]
 pub struct RtaCfg {
+    /// Module identifier embedded into all generated error codes
     pub module_id: u8,
+
+    /// Number of redundant object copies maintained on disk
+    ///
+    /// *NOTE:* The value atlest be greater than 1
     pub copies_on_disk: usize,
+
+    /// Path of the persistent backing file
     pub path: std::path::PathBuf,
 }
 
+/// Ṛta (ऋत) is a minimal metadata store for durable system state
+///
+/// ## Example
+///
+/// ```
+/// use rta::{RTA, Rta, RtaCfg};
+///
+/// #[repr(C)]
+/// #[repr(align(8))]
+/// #[derive(Clone, Default, RTA)]
+/// struct State {
+///     value: u64,
+/// }
+///
+/// let dir = tempfile::tempdir().expect("tempdir");
+/// let rta = Rta::<State>::new(RtaCfg {
+///     module_id: 1,
+///     copies_on_disk: 4,
+///     path: dir.path().join("state"),
+/// })
+/// .expect("failed to create RTA");
+///
+/// let state = unsafe { rta.read() };
+/// assert_eq!(state.value, 0);
+/// ```
 pub struct Rta<T: RTA + Send + Sync + Clone + 'static> {
     cfg: RtaCfg,
     crc32c: crc32::Crc32C,
@@ -169,6 +235,32 @@ impl<T> Rta<T>
 where
     T: RTA + Send + Sync + Clone + 'static,
 {
+    /// Opens or create a new instance of [`Rta`]
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use rta::{RTA, Rta, RtaCfg};
+    ///
+    /// #[repr(C)]
+    /// #[repr(C, align(8))]
+    /// #[derive(Clone, Default, RTA)]
+    /// struct State {
+    ///     value: u64,
+    /// }
+    ///
+    /// let dir = tempfile::tempdir().expect("tempdir");
+    ///
+    /// let rta = Rta::<State>::new(RtaCfg {
+    ///     module_id: 1,
+    ///     copies_on_disk: 3,
+    ///     path: dir.path().join("state"),
+    /// })
+    /// .expect("failed to create RTA");
+    ///
+    /// let state = unsafe { rta.read() };
+    /// assert_eq!(state.value, 0);
+    /// ```
     pub fn new(cfg: RtaCfg) -> error::FrozenResult<Self> {
         // sanity check
         assert!(cfg.copies_on_disk > 1, "Copies on disk must be greater then 1");
@@ -206,6 +298,53 @@ where
         })
     }
 
+    /// Update the latest version of `T` stored in [`Rta`]
+    ///
+    /// ## Durability Guarantee
+    ///
+    /// This call is by default designed to be a fire-and-forget call, and does not provide an
+    /// explicit filesystem durability guarantee.
+    ///
+    /// ## Ticket
+    ///
+    /// Every write gets a [`frozen_core::ack::AckTicket`] assigned to it, which when required can
+    /// be used to obtain an explicit durability guarantee.
+    ///
+    /// The caller can explicitly wait or block on the returned [`frozen_core::ack::AckTicket`]
+    /// using either the asynchronous `await` interface or the internal blocking `wait()` api.
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use rta::{RTA, Rta, RtaCfg};
+    ///
+    /// #[repr(C)]
+    /// #[repr(align(8))]
+    /// #[derive(Debug, Clone, Default, RTA)]
+    /// struct Meta {
+    ///     value: [u32; 2],
+    /// }
+    ///
+    /// let dir = tempfile::tempdir().expect("failed to create temp directory");
+    /// let rta = Rta::<Meta>::new(RtaCfg {
+    ///     module_id: 0,
+    ///     copies_on_disk: 4,
+    ///     path: dir.path().join("config.rta"),
+    /// })
+    /// .expect("failed to create RTA");
+    ///
+    /// let ticket = unsafe {
+    ///     rta.write(|m| {
+    ///         m.value = [0x2A, 0x3A];
+    ///     })
+    /// }
+    /// .expect("write failed");
+    ///
+    /// ticket.wait().expect("durability failed");
+    ///
+    /// let meta = unsafe { rta.read() };
+    /// assert_eq!(meta.value, [0x2A, 0x3A]);
+    /// ```
     #[inline(always)]
     pub unsafe fn write(&self, f: impl FnOnce(&mut T)) -> error::FrozenResult<ack::AckTicket> {
         let new_version = self.version.fetch_add(1, atomic::Ordering::AcqRel).wrapping_add(1);
@@ -225,6 +364,45 @@ where
         Ok(ticket)
     }
 
+    /// Read the latest version of `T` from [`Rta`]
+    ///
+    /// *NOTE:* The read is optimistic and does not provide any durability guarantee at time of read
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use rta::{RTA, Rta, RtaCfg};
+    ///
+    /// #[repr(C)]
+    /// #[repr(align(8))]
+    /// #[derive(Debug, Clone, Default, RTA)]
+    /// struct Meta {
+    ///     value: [u32; 2],
+    /// }
+    ///
+    /// let dir = tempfile::tempdir().expect("failed to create temp directory");
+    /// let rta = Rta::<Meta>::new(RtaCfg {
+    ///     module_id: 0,
+    ///     copies_on_disk: 4,
+    ///     path: dir.path().join("config.rta"),
+    /// })
+    /// .expect("failed to create RTA");
+    ///
+    /// let meta = unsafe { rta.read() };
+    /// assert_eq!(meta.value, [0, 0]);
+    ///
+    /// let ticket = unsafe {
+    ///     rta.write(|m| {
+    ///         m.value = [0x2A, 0x3A];
+    ///     })
+    /// }
+    /// .expect("write failed");
+    ///
+    /// ticket.wait().expect("durability failed");
+    ///
+    /// let meta = unsafe { rta.read() };
+    /// assert_eq!(meta.value, [0x2A, 0x3A]);
+    /// ```
     #[inline]
     pub unsafe fn read(&self) -> T {
         let live_version = self.published_version.load(atomic::Ordering::Acquire);
@@ -236,6 +414,30 @@ where
         })
     }
 
+    /// Delete [`Rta`] from filesystem, required for re-init process
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use rta::{RTA, Rta, RtaCfg};
+    ///
+    /// #[repr(C)]
+    /// #[repr(align(8))]
+    /// #[derive(Debug, Clone, Default, RTA)]
+    /// struct Meta {
+    ///     value: [u8; 8],
+    /// }
+    ///
+    /// let dir = tempfile::tempdir().expect("failed to create temp directory");
+    /// let mut rta = Rta::<Meta>::new(RtaCfg {
+    ///     module_id: 0,
+    ///     copies_on_disk: 4,
+    ///     path: dir.path().join("config.rta"),
+    /// })
+    /// .expect("failed to create RTA");
+    ///
+    /// assert!(rta.delete().is_ok());
+    /// ```
     #[inline]
     pub fn delete(&mut self) -> error::FrozenResult<()> {
         self.mmap.delete()
