@@ -29,104 +29,103 @@ T must satisfy following layout and safety constraints:
 - Size must be >0 and multiple of 8
 - Implements `Default + Clone + Send + Sync + 'static`
 
-#### Limitations of `T`
+## Requirements for type `T`
 
-- No non-deterministic feilds
-- No interior pointers or self-references
-- Changes made in struct layout break compatibility
+The type `T` must not,
+
+- Have any non-deterministic feilds
+- Have interior pointers or self-references
+- Have changes made to the layout after `Rta::init()`
+
+## Write
+
+The `Rta::write` is designed as a lightweight fire and forget metadata update premitive. The
+call itself does not wait for the filesystem durability, allowing sub-mirco second write latency.
+
+Apps requireing stronger durability can explicitly wait or block on the returned
+`frozen_core::ack::AckTicket` using either the asynchronous `await` interface or the internal
+blocking `wait()` api.
+
+Every write guarantees,
+
+* Serialized object updates
+* Crash-safe durability using multiple on-disk copies
+* Automatic recovery from torn or interrupted writes by selecting the newest valid version during
+  initialization
+  
+Observed measurements for latency (both single and multi-threaded) on `1,048,576` operations,
+
+| Metric | Single TX (µs) | Multi TX (µs) |
+|:------ |:---------------|:--------------|
+| P50    | 0.1830         | 0.4590        |
+| P90    | 0.2750         | 0.7330        |
+| P99    | 1216.5110      | 1.0090        |
+| Mean   | 38.0899        | 8.7255        |
+| Max    | 28606.4630     | 21790.7190    |
+
+Observed measurements for latency (both single and multi-threaded) on `4,096` operations, where
+every write waits for filesystem durability,
+
+| Metric | Single TX (ms) | Multi TX (ms) |
+|:------ |:---------------|:--------------|
+| P50    | 1.1899         | 1.2820        |
+| P90    | 1.2902         | 2.8078        |
+| P99    | 1.5165         | 5.2634        |
+| Mean   | 1.1885         | 1.7603        |
+| Max    | 31.3917        | 30.1793       |
+
+## Read
+
+The `Rta::read` is a wait-free fast-path read which reads the most recently updated `T`
+directly from the underlying memory mapping.
+
+A successful read reflects the latest published write, but does not imply that the object has
+been durably persisted to the filesystem. To guarantee durability, wait on the ticket returned
+by `Rta::write`.
+
+Observed measurements for latency (both single and multi threaded) on `1,048,576` individual ops,
+
+| Metric  | Single TX (µs) | Multi TX (µs) |
+|:--------|:---------------|:--------------|
+| P50     | 0.0000         | 0.0910        |
+| P90     | 0.0910         | 0.1830        |
+| P99     | 0.0920         | 0.8210        |
+| MEAN    | 0.0205         | 0.1362        |
+| MAX     | 38.0790        | 5013.5030     |
 
 ## Example
 
 ```rs
-use rta::{Rta, RTA};
+use rta::{RTA, Rta, RtaCfg};
 
 #[repr(C)]
-#[derive(Default, Clone, Copy, RTA)]
-struct TestType {
-    a: u64,
-    b: u64,
+#[repr(align(8))]
+#[derive(Debug, Clone, Default, RTA)]
+struct Config {
+    value: u64,
 }
 
-const MOD_ID: u8 = 0;
+let dir = tempfile::tempdir().expect("failed to create temp directory");
+let rta = Rta::<Config>::new(RtaCfg {
+    module_id: 0,
+    copies_on_disk: 4,
+    path: dir.path().join("config.rta"),
+})
+.expect("failed to create RTA");
 
-let path = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
-let rta = Rta::<TestType, MOD_ID>::new(&path).unwrap();
+let ticket = unsafe {
+    rta.write(|cfg| {
+        cfg.value = 0x2A;
+    })
+}
+.expect("write failed");
+ticket.wait().expect("durability failed");
 
-rta.write(|t| {
-  t.a = 0x20;
-  t.b = 0x40;
-}).unwrap();
-
-let val = rta.read().unwrap();
-assert_eq!(val.a, 0x20);
-assert_eq!(val.b, 0x40);
+let cfg = unsafe { rta.read() };
+assert_eq!(cfg.value, 0x2A);
 ```
-
-## Writes
-
-The [`Rta::write()`] operation in `Rta` is designed as a lightweight _fire-and-forget_ metadata update primitive.
-This call itself does **not** wait for disk synchronization on the fast path, allowing extremely low write latency
-while still preserving crash-safe durability semantics by handing off durability responsibility to a background
-thread.
-
-#### Guarantees
-
-Following guarantees are provided,
-
-- serialized metadata updates
-- crash-safe durability via multiple on-disk copies
-- automatic recovery from torn writes using latest valid version
-
-#### Benchmarks
-
-| Metric  | Latency |
-|:--------|:--------|
-| Average | 83 ns   |
-| P50     | 101 ns  |
-| P90     | 102 ns  |
-| P99     | 102 ns  |
-| P999    | 102 ns  |
-
-#### Notes
-
-- Most writes complete in ~100ns on the uncontended fast path.
-- The benchmark primarily measures,
-  - lock acquisition
-  - in-memory mutation
-  - dirty state propagation
-- Disk durability is handled asynchronously by a dedicated background thread.
-- Tail latency may increase if writes overlap with active durability synchronization.
-
-## Reads
-
-The [`Rta::read()`] operation returns the latest available in-memory metadata state.
-
-The read path is optimistic and does not provide durability guarantees at read time. Instead, reads are served
-directly from the synchronized in-memory cache, avoiding any disk IO overhead.
-
-#### Guarantees
-
-Following guarantees are provided,
-
-- lock-safe concurrent access
-- latest available in-memory metadata view
-- no torn or partially visible updates
-- parallel read operations
-
-#### Notes
-
-- Reads are performed entirely from the in-memory cache.
-- No mmap scan or disk synchronization occurs during the read path.
-- Read latency generally remains stable even during background durability synchronization.
-
-## Concurrency Model
-
-| Operation        | Parallelism | Blocks Reads | Blocks Writes |
-|:-----------------|-------------|--------------|---------------|
-| **Read**         | Yes         | No           | No            |
-| **Write**        | Limited     | No           | Sometimes     |
 
 ## Etymology
 
-ऋत (transliterated as Ṛta) is a _Vedic_ concept of cosmic order, truth, and invariance that inspired the design
-of Ṛta crate.
+ऋत (transliterated as Ṛta) is a _vedic_ concept of cosmic order, truth, and invariance that
+inspired the design of Ṛta crate.
