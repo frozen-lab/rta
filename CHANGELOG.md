@@ -1,5 +1,10 @@
 # Changelog
 
+## `0.0.3`
+
+- Rewrote from scratch
+  - Impl of `new`, `write`, `read` & `delete`
+
 ## `0.0.2`
 
 - Impl of async write & optimistic reads
