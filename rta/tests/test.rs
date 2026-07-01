@@ -17,11 +17,7 @@ struct Type {
 #[inline]
 fn prep_init(copies: usize) -> (std::path::PathBuf, RtaCfg) {
     let path = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
-    let cfg = RtaCfg {
-        module_id: MOD_ID,
-        path: path.clone(),
-        copies_on_disk: copies,
-    };
+    let cfg = RtaCfg { module_id: MOD_ID, path: path.clone(), copies_on_disk: copies };
 
     (path, cfg)
 }
@@ -130,11 +126,7 @@ mod new {
     #[cfg(debug_assertions)]
     fn err_invalid_cfg() {
         let (path, _) = prep_init(0x0A);
-        let cfg = RtaCfg {
-            module_id: MOD_ID,
-            copies_on_disk: 0,
-            path: path,
-        };
+        let cfg = RtaCfg { module_id: MOD_ID, copies_on_disk: 0, path: path };
         let _ = Rta::<Type>::new(cfg);
     }
 }
@@ -359,6 +351,7 @@ mod write_read {
             })
         };
 
+        // NOTE: Determining the current state of `Type` is very tough here
         while !done.load(Ordering::Acquire) {
             let _ = unsafe { rta.read() };
         }
@@ -404,7 +397,6 @@ mod write_read {
         }
 
         ticket.unwrap().wait().unwrap();
-
         assert_eq!(unsafe { rta.read() }, Type { a: 0xFFF, b: 0x1000 });
     }
 

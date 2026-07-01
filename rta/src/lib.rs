@@ -321,7 +321,8 @@ mod err {
     pub const CRP: ErrCode = ErrCode::new(0x02, "All copies of `T` are corrupted");
 
     /// invalid hash for T
-    pub const HSH: ErrCode = ErrCode::new(0x04, "`T` has HASH mismatch as it may be updated after being stored");
+    pub const HSH: ErrCode =
+        ErrCode::new(0x04, "`T` has HASH mismatch as it may be updated after being stored");
 
     /// type `T` implements drop
     pub const DRP: ErrCode = ErrCode::new(0x06, "T must not implement Drop");

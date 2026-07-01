@@ -4,7 +4,7 @@ extern crate proc_macro;
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput};
+use syn::{Data, DeriveInput, parse_macro_input};
 
 /// Derives the `rta::RTA` trait for a struct `T`
 ///
@@ -25,9 +25,12 @@ pub fn derive_rta(input: TokenStream) -> TokenStream {
     let ident = input.ident;
 
     if !has_repr_c(&input.attrs) {
-        return syn::Error::new_spanned(ident, "RTA derive error: struct must use #[repr(C)] for stable layout")
-            .to_compile_error()
-            .into();
+        return syn::Error::new_spanned(
+            ident,
+            "RTA derive error: struct must use #[repr(C)] for stable layout",
+        )
+        .to_compile_error()
+        .into();
     }
 
     let mut hash = hasher::hash(0, ident.to_string().as_bytes());
@@ -35,9 +38,12 @@ pub fn derive_rta(input: TokenStream) -> TokenStream {
     let fields = match input.data {
         Data::Struct(s) => s.fields,
         _ => {
-            return syn::Error::new_spanned(ident, "RTA derive error: RTA can only be derived for a struct")
-                .to_compile_error()
-                .into();
+            return syn::Error::new_spanned(
+                ident,
+                "RTA derive error: RTA can only be derived for a struct",
+            )
+            .to_compile_error()
+            .into();
         }
     };
 
@@ -113,9 +119,11 @@ fn has_repr_c(attrs: &[syn::Attribute]) -> bool {
             return false;
         }
 
-        attr.parse_args_with(syn::punctuated::Punctuated::<syn::Ident, syn::Token![,]>::parse_terminated)
-            .map(|idents| idents.iter().any(|i| i == "C"))
-            .unwrap_or(false)
+        attr.parse_args_with(
+            syn::punctuated::Punctuated::<syn::Ident, syn::Token![,]>::parse_terminated,
+        )
+        .map(|idents| idents.iter().any(|i| i == "C"))
+        .unwrap_or(false)
     })
 }
 
